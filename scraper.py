@@ -1,6 +1,6 @@
 """
 scraper.py
-Lädt alle Paper ausgewählter Journals aus OpenAlex und speichert sie als JSON.
+Lädt Paper ausgewählter Journals aus OpenAlex und speichert sie als JSON.
 """
 
 import os
@@ -93,7 +93,14 @@ def fetch_page(issn, cursor="*", retries=3):
 # -----------------------------------------------------
 # Komplettes Journal herunterladen
 # -----------------------------------------------------
-def scrape_journal(journal_code):
+def scrape_journal(journal_code, progress_callback=None):
+    """
+    Lädt alle Paper eines Journals von OpenAlex.
+
+    progress_callback: optionale Funktion, die mit (anzahl_geladen) aufgerufen
+    wird, nachdem jede Seite geladen wurde. Damit kann z.B. ein Streamlit-UI
+    live den Fortschritt anzeigen.
+    """
     if journal_code not in JOURNALS:
         raise ValueError(f"Unbekanntes Journal: {journal_code}")
 
@@ -128,6 +135,8 @@ def scrape_journal(journal_code):
             })
 
         print(f"  {len(papers)} Paper geladen...")
+        if progress_callback:
+            progress_callback(len(papers))
 
         cursor = data.get("meta", {}).get("next_cursor")
         if cursor is None:
@@ -148,29 +157,63 @@ def save_papers(papers, journal_code):
     print(f"Gespeichert unter {filepath}")
 
 
-# -----------------------------------------------------
-# Alle Journals nacheinander scrapen
-# -----------------------------------------------------
-def scrape_all():
-    all_papers = []
-    for journal_code in JOURNALS:
-        try:
-            papers = scrape_journal(journal_code)
-            save_papers(papers, journal_code)
-            all_papers.extend(papers)
-        except RuntimeError as e:
-            print(f"Überspringe {journal_code}: {e}")
-            continue
-
-    # Zusätzlich alle Journals zusammen in einer Datei speichern
+def save_combined(all_papers):
     os.makedirs(DATA_DIR, exist_ok=True)
     combined_path = os.path.join(DATA_DIR, "all_papers.json")
     with open(combined_path, "w", encoding="utf-8") as f:
         json.dump(all_papers, f, ensure_ascii=False, indent=2)
-    print(f"\nGesamtdatei gespeichert unter {combined_path}")
-    print(f"Gesamt über alle Journals: {len(all_papers)} Paper")
+    return combined_path
 
+
+# -----------------------------------------------------
+# Ausgewählte Journals scrapen (für UI-Aufrufe, z.B. aus Streamlit)
+# -----------------------------------------------------
+def scrape_selected(journal_codes, status_callback=None):
+    """
+    Lädt nur die übergebenen Journals (Liste von Codes, z.B. ["BSE", "JCP"]).
+
+    status_callback: optionale Funktion status_callback(journal_code, anzahl)
+    für Live-Updates in einer UI.
+
+    Bereits vorhandene all_papers.json wird um die neu geladenen Journals
+    ergänzt/aktualisiert (andere, nicht neu geladene Journals bleiben erhalten).
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    combined_path = os.path.join(DATA_DIR, "all_papers.json")
+
+    # Bestehende Daten laden, um andere Journals nicht zu verlieren
+    existing = []
+    if os.path.exists(combined_path):
+        with open(combined_path, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+
+    # Alle Paper von Journals behalten, die JETZT NICHT neu geladen werden
+    kept = [p for p in existing if p.get("journal_code") not in journal_codes]
+
+    new_papers = []
+    for journal_code in journal_codes:
+        try:
+            def cb(n, code=journal_code):
+                if status_callback:
+                    status_callback(code, n)
+
+            papers = scrape_journal(journal_code, progress_callback=cb)
+            save_papers(papers, journal_code)
+            new_papers.extend(papers)
+        except RuntimeError as e:
+            print(f"Überspringe {journal_code}: {e}")
+            continue
+
+    all_papers = kept + new_papers
+    save_combined(all_papers)
     return all_papers
+
+
+# -----------------------------------------------------
+# Alle Journals nacheinander scrapen (klassischer CLI-Modus)
+# -----------------------------------------------------
+def scrape_all():
+    return scrape_selected(list(JOURNALS.keys()))
 
 
 # -----------------------------------------------------
@@ -180,4 +223,5 @@ if __name__ == "__main__":
     if not EMAIL:
         print("Hinweis: Keine SCRAPER_EMAIL gesetzt. Läuft trotzdem, aber mit niedrigeren Rate-Limits.\n")
 
-    scrape_all()
+    all_papers = scrape_all()
+    print(f"\nGesamt über alle Journals: {len(all_papers)} Paper")
