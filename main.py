@@ -7,9 +7,13 @@ Sustainability Orientation.
 
 import json
 import os
+from collections import Counter
+from itertools import combinations
 
 import altair as alt
+import networkx as nx
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from scraper import JOURNALS, scrape_selected
@@ -52,7 +56,6 @@ def inject_css():
             padding-bottom: 3rem;
         }
 
-        /* Header */
         .app-title {
             font-size: 2.1rem;
             font-weight: 800;
@@ -66,7 +69,6 @@ def inject_css():
             margin-bottom: 1.5rem;
         }
 
-        /* Metric cards */
         .metric-card {
             background: white;
             border: 1px solid #E7EAE8;
@@ -95,7 +97,6 @@ def inject_css():
             margin-top: 0.2rem;
         }
 
-        /* Section headers */
         .section-header {
             font-size: 1.25rem;
             font-weight: 700;
@@ -109,7 +110,6 @@ def inject_css():
             margin-bottom: 0.8rem;
         }
 
-        /* Journal selection cards */
         .journal-card {
             background: white;
             border: 1px solid #E7EAE8;
@@ -153,6 +153,19 @@ def inject_css():
             padding: 0.1rem 0.5rem; border-radius: 6px;
             font-size: 0.75rem; font-weight: 700;
         }
+
+        .result-card {
+            background: white;
+            border: 1px solid #E7EAE8;
+            border-radius: 12px;
+            padding: 0.2rem 0.2rem;
+            margin-bottom: 0.5rem;
+        }
+        .authors-line {
+            color: var(--brand-muted);
+            font-size: 0.85rem;
+            margin-bottom: 0.4rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -174,6 +187,26 @@ def metric_card(label, value, sub=None):
 
 
 # =======================================================
+# Hilfsfunktionen für Autoren
+# =======================================================
+def get_authors_list(row):
+    """Gibt die Autorenliste eines Papers robust zurück (auch wenn das Feld fehlt)."""
+    authors = row.get("authors", None) if hasattr(row, "get") else None
+    if isinstance(authors, list):
+        return [a for a in authors if a]
+    return []
+
+
+def format_authors(authors, max_shown=4):
+    if not authors:
+        return "Keine Autoreninformation verfügbar"
+    if len(authors) <= max_shown:
+        return ", ".join(authors)
+    shown = ", ".join(authors[:max_shown])
+    return f"{shown} et al. ({len(authors)} Autor:innen gesamt)"
+
+
+# =======================================================
 # Daten laden
 # =======================================================
 @st.cache_data
@@ -190,14 +223,121 @@ def get_enriched_papers(papers):
 
 
 def available_journal_codes():
-    """Welche Journals stecken bereits in den gespeicherten Daten?"""
     papers = load_papers()
     return sorted({p.get("journal_code") for p in papers if p.get("journal_code")})
 
 
 # =======================================================
+# Netzwerk-Analyse: gemeinsames Auftreten von Theorien
+# =======================================================
+def compute_theory_cooccurrence(records):
+    """
+    Zählt, wie oft je zwei Theorien gemeinsam im selben Abstract erkannt wurden,
+    sowie die Gesamthäufigkeit jeder einzelnen Theorie.
+    """
+    pair_counter = Counter()
+    freq_counter = Counter()
+
+    for r in records:
+        theories = sorted(set(r.get("all_theories", []) or []))
+        for t in theories:
+            freq_counter[t] += 1
+        for a, b in combinations(theories, 2):
+            pair_counter[(a, b)] += 1
+
+    return pair_counter, freq_counter
+
+
+def build_theory_network_figure(pair_counter, freq_counter, min_cooccurrence=1, max_nodes=40):
+    """Baut eine interaktive Plotly-Netzwerkgrafik der Theorie-Co-Occurrence."""
+    G = nx.Graph()
+
+    # nur die häufigsten Theorien berücksichtigen, damit das Netzwerk lesbar bleibt
+    top_theories = {t for t, _ in freq_counter.most_common(max_nodes)}
+
+    for t, f in freq_counter.items():
+        if t in top_theories:
+            G.add_node(t, freq=f)
+
+    for (a, b), c in pair_counter.items():
+        if c >= min_cooccurrence and a in top_theories and b in top_theories:
+            G.add_edge(a, b, weight=c)
+
+    G.remove_nodes_from(list(nx.isolates(G)))
+
+    if G.number_of_nodes() == 0:
+        return None
+
+    pos = nx.spring_layout(G, seed=42, k=1.1 / max(1, G.number_of_nodes()) ** 0.4)
+
+    weights = [d["weight"] for _, _, d in G.edges(data=True)]
+    max_w = max(weights) if weights else 1
+
+    edge_traces = []
+    for u, v, data in G.edges(data=True):
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
+        w = data["weight"]
+        width = 1 + (w / max_w) * 7
+        opacity = 0.25 + 0.5 * (w / max_w)
+        edge_traces.append(
+            go.Scatter(
+                x=[x0, x1],
+                y=[y0, y1],
+                mode="lines",
+                line=dict(width=width, color=f"rgba(46,111,94,{opacity:.2f})"),
+                hoverinfo="text",
+                text=f"{u} ↔ {v}: {w} gemeinsame Paper",
+                showlegend=False,
+            )
+        )
+
+    node_x, node_y, node_text, node_size, node_hover = [], [], [], [], []
+    for node, data in G.nodes(data=True):
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+        node_text.append(node)
+        freq = data.get("freq", 1)
+        node_size.append(16 + freq * 3.5)
+        node_hover.append(f"<b>{node}</b><br>Erkannt in {freq} Paper(en)")
+
+    node_trace = go.Scatter(
+        x=node_x,
+        y=node_y,
+        mode="markers+text",
+        text=node_text,
+        textposition="top center",
+        hovertext=node_hover,
+        hoverinfo="text",
+        marker=dict(
+            size=node_size,
+            color="#2E6F5E",
+            line=dict(width=1.5, color="white"),
+        ),
+        textfont=dict(size=11, color="#1F2A24"),
+        showlegend=False,
+    )
+
+    fig = go.Figure(data=edge_traces + [node_trace])
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        height=580,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        hovermode="closest",
+    )
+    return fig
+
+
+# =======================================================
 # Bildschirm 1: Journal-Auswahl & Ladevorgang
 # =======================================================
+EMAIL_HINT_SHOWN = [False]
+
+
 def show_scraper_screen():
     st.markdown('<div class="app-title">📚 Paper-Daten laden</div>', unsafe_allow_html=True)
     st.markdown(
@@ -258,7 +398,6 @@ def show_scraper_screen():
             counters[journal_code] = n
             journal_name = JOURNALS[journal_code]["name"]
             status_area.write(f"**{journal_code}** – {journal_name}: {n} Paper geladen...")
-            # grobe Fortschrittsanzeige über die Anzahl bearbeiteter Journals
             done_journals = sum(1 for c in selected if counters[c] > 0)
             progress_bar.progress(min(done_journals / len(selected), 1.0))
 
@@ -277,9 +416,6 @@ def show_scraper_screen():
         st.rerun()
 
 
-EMAIL_HINT_SHOWN = [False]
-
-
 # =======================================================
 # Bildschirm 2: Dashboard
 # =======================================================
@@ -287,6 +423,11 @@ def show_dashboard():
     papers = load_papers()
     enriched = get_enriched_papers(papers)
     df = pd.DataFrame(enriched)
+
+    if "all_theories" not in df.columns:
+        df["all_theories"] = [[] for _ in range(len(df))]
+
+    all_theory_names = sorted(count_all_theories(df.to_dict("records")).keys())
 
     # ---------------- Sidebar ----------------
     st.sidebar.markdown("### 📂 Daten")
@@ -316,7 +457,12 @@ def show_dashboard():
     only_circular = st.sidebar.checkbox("Nur Circular Economy Paper", value=False)
     only_sustainability = st.sidebar.checkbox("Nur Sustainability Orientation Paper", value=False)
     only_with_theory = st.sidebar.checkbox("Nur Paper mit erkannter Theorie", value=False)
-    search_term = st.sidebar.text_input("Volltextsuche (Titel)", "")
+
+    theory_filter = st.sidebar.multiselect(
+        "Nach Theorie filtern",
+        options=all_theory_names,
+        help="Zeigt nur Paper, in denen mindestens eine der ausgewählten Theorien erkannt wurde.",
+    )
 
     filtered = df[
         df["journal_code"].isin(selected_journals)
@@ -328,8 +474,12 @@ def show_dashboard():
         filtered = filtered[filtered["sustainability_orientation"] == True]
     if only_with_theory:
         filtered = filtered[filtered["theory_count"] > 0]
-    if search_term:
-        filtered = filtered[filtered["title"].str.contains(search_term, case=False, na=False)]
+    if theory_filter:
+        filtered = filtered[
+            filtered["all_theories"].apply(
+                lambda ts: any(t in (ts or []) for t in theory_filter)
+            )
+        ]
 
     # ---------------- Header ----------------
     st.markdown('<div class="app-title">Theorie-Landscape</div>', unsafe_allow_html=True)
@@ -408,9 +558,7 @@ def show_dashboard():
 
     with col_left:
         st.markdown('<div class="section-header">📰 Paper pro Journal</div>', unsafe_allow_html=True)
-        journal_counts = (
-            filtered["journal_name"].value_counts().reset_index()
-        )
+        journal_counts = filtered["journal_name"].value_counts().reset_index()
         journal_counts.columns = ["Journal", "Anzahl"]
         donut = (
             alt.Chart(journal_counts)
@@ -491,11 +639,56 @@ def show_dashboard():
 
     st.markdown("---")
 
-    # ---------------- Paper-Tabelle mit Detailansicht ----------------
+    # ---------------- Netzwerk-Analyse ----------------
+    st.markdown('<div class="section-header">🕸️ Theorie-Netzwerk</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Zeigt, welche Theorien häufig gemeinsam in einem Abstract '
+        "untersucht werden. Die Linienstärke entspricht der Anzahl gemeinsamer Paper, "
+        "die Knotengröße der Gesamthäufigkeit einer Theorie.</div>",
+        unsafe_allow_html=True,
+    )
+
+    records_for_network = filtered.to_dict("records")
+    pair_counter, freq_counter = compute_theory_cooccurrence(records_for_network)
+
+    if not pair_counter:
+        st.info(
+            "Für die aktuelle Filterauswahl gibt es keine Paper, in denen mindestens zwei "
+            "Theorien gemeinsam erkannt wurden."
+        )
+    else:
+        max_possible = max(pair_counter.values())
+        min_co = st.slider(
+            "Mindestanzahl gemeinsamer Nennungen für eine Verbindung",
+            1, max(1, max_possible), 1,
+        )
+        fig = build_theory_network_figure(pair_counter, freq_counter, min_cooccurrence=min_co)
+
+        if fig is None:
+            st.info("Bei dieser Mindestanzahl bleiben keine Verbindungen übrig. Schwelle reduzieren.")
+        else:
+            st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("Häufigste Theorie-Paare als Tabelle anzeigen"):
+            pair_df = pd.DataFrame(
+                [
+                    {"Theorie A": a, "Theorie B": b, "Gemeinsame Paper": c}
+                    for (a, b), c in pair_counter.most_common()
+                ]
+            )
+            st.dataframe(pair_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ---------------- Paper-Tabelle ----------------
     st.markdown('<div class="section-header">📄 Paper im Detail</div>', unsafe_allow_html=True)
 
-    display_df = filtered[[
-        "title", "journal_code", "year", "citations",
+    display_df = filtered.copy()
+    display_df["Autoren"] = display_df.apply(
+        lambda r: format_authors(get_authors_list(r), max_shown=2), axis=1
+    )
+    display_df = display_df[[
+        "title", "Autoren", "journal_code", "year", "citations",
         "theory_count", "circular_economy", "sustainability_orientation"
     ]].sort_values("theory_count", ascending=False).rename(columns={
         "title": "Titel", "journal_code": "Journal", "year": "Jahr",
@@ -513,37 +706,81 @@ def show_dashboard():
         mime="text/csv",
     )
 
-    st.write("")
-    st.markdown("**Einzelnes Paper auswählen, um Abstract & erkannte Theorien zu sehen:**")
-    paper_titles = filtered["title"].tolist()
+    st.markdown("---")
 
-    if paper_titles:
-        selected_title = st.selectbox("Paper", paper_titles)
-        selected_paper = filtered[filtered["title"] == selected_title].iloc[0]
+    # ---------------- Suchleiste + Ergebnisliste ----------------
+    st.markdown('<div class="section-header">🔍 Paper durchsuchen</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Suche nach Titel, Autor:in oder Stichwort im Abstract. '
+        "Nutze zusätzlich den Theorie-Filter in der Seitenleiste, um z.B. alle Abstracts zu "
+        "sehen, in denen eine bestimmte Theorie vorkommt.</div>",
+        unsafe_allow_html=True,
+    )
 
-        with st.container():
-            st.markdown(f"#### {selected_paper['title']}")
+    search_query = st.text_input(
+        "🔎 Suchbegriff",
+        placeholder="z.B. 'stakeholder theory', ein Autorenname oder ein Stichwort...",
+        label_visibility="collapsed",
+    )
 
+    search_results = filtered.copy()
+    if search_query:
+        q = search_query.lower().strip()
+
+        def matches(row):
+            title_match = q in str(row.get("title", "")).lower()
+            abstract_match = q in str(row.get("abstract", "")).lower()
+            author_match = any(q in a.lower() for a in get_authors_list(row))
+            return title_match or abstract_match or author_match
+
+        search_results = search_results[search_results.apply(matches, axis=1)]
+
+    search_results = search_results.sort_values("theory_count", ascending=False)
+    total_hits = len(search_results)
+    max_display = 30
+
+    if theory_filter:
+        st.caption(
+            f"{total_hits} Treffer · gefiltert nach Theorie(n): {', '.join(theory_filter)}"
+        )
+    else:
+        st.caption(f"{total_hits} Treffer")
+
+    if total_hits == 0:
+        st.info("Keine Paper gefunden, die zu Suchbegriff und Filtern passen.")
+    else:
+        if total_hits > max_display:
+            st.caption(f"Zeige die {max_display} relevantesten Treffer (nach Anzahl erkannter Theorien sortiert).")
+
+        for _, row in search_results.head(max_display).iterrows():
+            authors = get_authors_list(row)
             badges = ""
-            if selected_paper["circular_economy"]:
+            if row.get("circular_economy"):
                 badges += '<span class="badge-ce">Circular Economy</span>'
-            if selected_paper["sustainability_orientation"]:
+            if row.get("sustainability_orientation"):
                 badges += '<span class="badge-so">Sustainability Orientation</span>'
-            if badges:
-                st.markdown(badges, unsafe_allow_html=True)
 
-            meta_col1, meta_col2, meta_col3 = st.columns(3)
-            meta_col1.write(f"**Journal:** {selected_paper['journal_name']} ({selected_paper['year']})")
-            meta_col2.write(f"**DOI:** {selected_paper['doi']}")
-            meta_col3.write(f"**Zitationen:** {selected_paper['citations']}")
+            with st.expander(f"{row['title']}  —  {row.get('journal_code', '')} · {row.get('year', '')}"):
+                if badges:
+                    st.markdown(badges, unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="authors-line">👤 {format_authors(authors)}</div>',
+                    unsafe_allow_html=True,
+                )
 
-            if selected_paper["all_theories"]:
-                st.write("**Erkannte Theorien:** " + ", ".join(selected_paper["all_theories"]))
-            else:
-                st.write("**Erkannte Theorien:** keine")
+                meta_col1, meta_col2, meta_col3 = st.columns(3)
+                meta_col1.write(f"**Journal:** {row.get('journal_name', '')} ({row.get('year', '')})")
+                meta_col2.write(f"**DOI:** {row.get('doi', '') or '–'}")
+                meta_col3.write(f"**Zitationen:** {row.get('citations', 0)}")
 
-            st.write("**Abstract:**")
-            st.write(selected_paper["abstract"] if selected_paper["abstract"] else "_Kein Abstract verfügbar._")
+                theories = row.get("all_theories") or []
+                if theories:
+                    st.write("**Erkannte Theorien:** " + ", ".join(theories))
+                else:
+                    st.write("**Erkannte Theorien:** keine")
+
+                st.write("**Abstract:**")
+                st.write(row.get("abstract") or "_Kein Abstract verfügbar._")
 
 
 # =======================================================
@@ -553,7 +790,6 @@ def main():
     inject_css()
 
     if "show_scraper" not in st.session_state:
-        # Wenn noch keine Daten vorhanden sind, direkt mit der Auswahl starten
         st.session_state.show_scraper = len(load_papers()) == 0
 
     if st.session_state.show_scraper:
