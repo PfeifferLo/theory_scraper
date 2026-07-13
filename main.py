@@ -19,7 +19,8 @@ import streamlit as st
 from scraper import JOURNALS, scrape_selected
 from theory_rules import analyze_papers, count_all_theories
 
-DATA_DIR = "data"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 COMBINED_FILE = os.path.join(DATA_DIR, "all_papers.json")
 
 # Spalten, die das Dashboard mindestens erwartet. Fehlt eine davon (z.B. weil
