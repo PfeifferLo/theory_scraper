@@ -1,11 +1,29 @@
 """
 scraper.py
 Lädt Paper ausgewählter Journals aus OpenAlex und speichert sie als JSON.
+
+WICHTIG (Streamlit Community Cloud):
+Das Dateisystem dort ist NICHT persistent. Bei jedem Redeploy / Git-Push /
+"Aufwachen" nach Inaktivität wird der Container frisch aus dem GitHub-Repo
+aufgebaut – alles, was nur lokal in data/ liegt, geht dabei verloren.
+Damit die gescrapten Paper einen Neustart überleben, wird all_papers.json
+nach jedem erfolgreichen Scrape-Lauf automatisch per GitHub API zurück ins
+Repo committet (siehe push_data_to_github()). Dafür müssen in den
+Streamlit-Cloud "Secrets" folgende Werte gesetzt sein:
+
+    GITHUB_TOKEN  = "ghp_xxx..."       # Personal Access Token mit Schreibrecht (repo scope)
+    GITHUB_REPO   = "dein-user/dein-repo-name"
+    GITHUB_BRANCH = "main"             # optional, Default "main"
+
+Ohne gesetzte Secrets läuft der Scraper trotzdem ganz normal – der Push wird
+dann einfach übersprungen (mit einem Hinweis in der Konsole/im Log).
 """
 
-import os
+import base64
 import json
+import os
 import time
+
 import requests
 
 # -----------------------------------------------------
@@ -23,7 +41,11 @@ HEADERS = {
     "User-Agent": f"PaperTheoryScraper/1.0 (mailto:{EMAIL})" if EMAIL else "PaperTheoryScraper/1.0"
 }
 
-DATA_DIR = "data"
+# Absoluter Pfad relativ zum Speicherort dieses Skripts – dadurch schreibt
+# scraper.py garantiert in denselben Ordner, aus dem main.py liest, egal von
+# wo aus der Prozess gestartet wurde.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 JOURNALS = {
     "BSE": {
@@ -142,6 +164,9 @@ def scrape_journal(journal_code, progress_callback=None):
         if cursor is None:
             break
 
+    if len(papers) == 0:
+        print(f"⚠️  Keine Paper für {journal_code} (ISSN {journal['issn']}) gefunden.")
+
     print(f"Fertig: {len(papers)} Paper für {journal_code}.")
     return papers
 
@@ -163,6 +188,70 @@ def save_combined(all_papers):
     with open(combined_path, "w", encoding="utf-8") as f:
         json.dump(all_papers, f, ensure_ascii=False, indent=2)
     return combined_path
+
+
+# -----------------------------------------------------
+# Persistenz: gescrapte Daten zurück ins GitHub-Repo committen
+# -----------------------------------------------------
+def push_data_to_github(filepath, repo_relative_path="data/all_papers.json", commit_message=None):
+    """
+    Committet die angegebene Datei über die GitHub Contents API zurück ins
+    Repo. Notwendig, weil das Dateisystem auf Streamlit Community Cloud bei
+    jedem Neustart zurückgesetzt wird – nur was im Repo liegt, übersteht das.
+
+    Erwartet in st.secrets (App-Settings -> Secrets auf Streamlit Cloud):
+        GITHUB_TOKEN, GITHUB_REPO, optional GITHUB_BRANCH (Default "main")
+
+    Gibt True zurück bei Erfolg, sonst False. Wirft KEINE Exception nach
+    außen, damit ein fehlender/falscher Github-Push den Scraper-Lauf nicht
+    zum Absturz bringt.
+    """
+    try:
+        import streamlit as st
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+        branch = st.secrets.get("GITHUB_BRANCH", "main")
+    except Exception:
+        print("ℹ️  Kein GitHub-Push konfiguriert (GITHUB_TOKEN/GITHUB_REPO fehlen in st.secrets) – "
+              "Daten werden NICHT persistiert und gehen beim nächsten Neustart verloren.")
+        return False
+
+    api_url = f"https://api.github.com/repos/{repo}/contents/{repo_relative_path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+    try:
+        with open(filepath, "rb") as f:
+            content_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        # aktuelle SHA der Datei im Repo holen (nötig für Update, sonst legt
+        # GitHub eine neue Datei an statt die bestehende zu überschreiben)
+        sha = None
+        get_resp = requests.get(api_url, headers=headers, params={"ref": branch}, timeout=20)
+        if get_resp.status_code == 200:
+            sha = get_resp.json().get("sha")
+
+        payload = {
+            "message": commit_message or "chore: update scraped paper data",
+            "content": content_b64,
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        put_resp = requests.put(api_url, headers=headers, json=payload, timeout=30)
+        if put_resp.status_code in (200, 201):
+            print(f"✅ {repo_relative_path} erfolgreich zu GitHub gepusht (persistiert).")
+            return True
+
+        print(f"⚠️  GitHub-Push fehlgeschlagen ({put_resp.status_code}): {put_resp.text[:300]}")
+        return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️  GitHub-Push fehlgeschlagen: {e}")
+        return False
 
 
 # -----------------------------------------------------
@@ -205,7 +294,16 @@ def scrape_selected(journal_codes, status_callback=None):
             continue
 
     all_papers = kept + new_papers
-    save_combined(all_papers)
+    combined_path = save_combined(all_papers)
+
+    # Daten persistent machen, damit sie einen Streamlit-Cloud-Neustart
+    # überleben (siehe Docstring von push_data_to_github).
+    push_data_to_github(
+        combined_path,
+        repo_relative_path="data/all_papers.json",
+        commit_message=f"chore: update paper data ({', '.join(journal_codes)})",
+    )
+
     return all_papers
 
 
