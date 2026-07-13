@@ -22,6 +22,24 @@ from theory_rules import analyze_papers, count_all_theories
 DATA_DIR = "data"
 COMBINED_FILE = os.path.join(DATA_DIR, "all_papers.json")
 
+# Spalten, die das Dashboard mindestens erwartet. Fehlt eine davon (z.B. weil
+# analyze_papers() sie in Einzelfällen nicht liefert), wird sie mit einem
+# sinnvollen Default ergänzt, statt dass die App mit einem KeyError abstürzt.
+REQUIRED_COLUMNS = {
+    "title": "",
+    "authors": None,
+    "abstract": "",
+    "doi": "",
+    "journal_code": None,
+    "journal_name": "",
+    "year": None,
+    "citations": 0,
+    "circular_economy": False,
+    "sustainability_orientation": False,
+    "theory_count": 0,
+    "all_theories": None,  # wird unten separat als Liste behandelt
+}
+
 st.set_page_config(
     page_title="Theorie-Landscape: Circular Economy & Sustainability",
     page_icon="📚",
@@ -166,6 +184,14 @@ def inject_css():
             font-size: 0.85rem;
             margin-bottom: 0.4rem;
         }
+        .empty-state {
+            background: white;
+            border: 1px dashed #C7D1CB;
+            border-radius: 14px;
+            padding: 2.2rem 1.6rem;
+            text-align: center;
+            color: var(--brand-muted);
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -227,6 +253,23 @@ def available_journal_codes():
     return sorted({p.get("journal_code") for p in papers if p.get("journal_code")})
 
 
+def ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Stellt sicher, dass alle vom Dashboard benötigten Spalten existieren –
+    verhindert KeyError/Absturz, wenn analyze_papers() mal ein Feld nicht
+    liefert oder df leer ist.
+    """
+    for col, default in REQUIRED_COLUMNS.items():
+        if col not in df.columns:
+            if col == "all_theories":
+                df[col] = [[] for _ in range(len(df))]
+            else:
+                df[col] = default
+    # all_theories kann als None statt [] vorliegen -> normalisieren
+    df["all_theories"] = df["all_theories"].apply(lambda v: v if isinstance(v, list) else [])
+    return df
+
+
 # =======================================================
 # Netzwerk-Analyse: gemeinsames Auftreten von Theorien
 # =======================================================
@@ -248,7 +291,14 @@ def compute_theory_cooccurrence(records):
     return pair_counter, freq_counter
 
 
-def build_theory_network_figure(pair_counter, freq_counter, min_cooccurrence=1, max_nodes=40):
+def build_theory_network_figure(
+    pair_counter,
+    freq_counter,
+    min_cooccurrence=1,
+    max_nodes=40,
+    highlight_theory=None,
+    show_all_labels=True,
+):
     """Baut eine interaktive Plotly-Netzwerkgrafik der Theorie-Co-Occurrence."""
     G = nx.Graph()
 
@@ -268,39 +318,104 @@ def build_theory_network_figure(pair_counter, freq_counter, min_cooccurrence=1, 
     if G.number_of_nodes() == 0:
         return None
 
-    pos = nx.spring_layout(G, seed=42, k=1.1 / max(1, G.number_of_nodes()) ** 0.4)
+    # Kamada-Kawai liefert für diese Art von Netzwerken meist deutlich
+    # klarere, weniger überlappende Layouts als spring_layout. Fällt das
+    # Netzwerk in mehrere unverbundene Teile, weichen wir auf spring_layout aus.
+    try:
+        if nx.is_connected(G):
+            pos = nx.kamada_kawai_layout(G)
+        else:
+            pos = nx.spring_layout(G, seed=42, k=1.6 / max(1, G.number_of_nodes()) ** 0.4, iterations=200)
+    except Exception:
+        pos = nx.spring_layout(G, seed=42, k=1.6 / max(1, G.number_of_nodes()) ** 0.4, iterations=200)
 
     weights = [d["weight"] for _, _, d in G.edges(data=True)]
     max_w = max(weights) if weights else 1
+
+    # Wenn eine Theorie hervorgehoben werden soll: Nachbarschaft bestimmen
+    highlighted_neighbors = set()
+    if highlight_theory and highlight_theory in G.nodes:
+        highlighted_neighbors = set(G.neighbors(highlight_theory)) | {highlight_theory}
+
+    def edge_is_dimmed(u, v):
+        if not highlight_theory:
+            return False
+        return not (u in highlighted_neighbors and v in highlighted_neighbors)
+
+    def node_is_dimmed(n):
+        if not highlight_theory:
+            return False
+        return n not in highlighted_neighbors
 
     edge_traces = []
     for u, v, data in G.edges(data=True):
         x0, y0 = pos[u]
         x1, y1 = pos[v]
         w = data["weight"]
-        width = 1 + (w / max_w) * 7
-        opacity = 0.25 + 0.5 * (w / max_w)
+        width = 1.2 + (w / max_w) * 7
+        dimmed = edge_is_dimmed(u, v)
+        base_opacity = 0.12 if dimmed else (0.3 + 0.55 * (w / max_w))
+        color = f"rgba(150,160,155,{base_opacity:.2f})" if dimmed else f"rgba(46,111,94,{base_opacity:.2f})"
         edge_traces.append(
             go.Scatter(
-                x=[x0, x1],
-                y=[y0, y1],
+                x=[x0, x1, None],
+                y=[y0, y1, None],
                 mode="lines",
-                line=dict(width=width, color=f"rgba(46,111,94,{opacity:.2f})"),
-                hoverinfo="text",
-                text=f"{u} ↔ {v}: {w} gemeinsame Paper",
+                line=dict(width=width, color=color),
+                hoverinfo="skip",
                 showlegend=False,
             )
         )
 
-    node_x, node_y, node_text, node_size, node_hover = [], [], [], [], []
+    # unsichtbare Hover-Punkte in der Mitte jeder Kante, damit man die
+    # Anzahl gemeinsamer Paper beim Hovern über die Verbindung sehen kann
+    edge_hover_x, edge_hover_y, edge_hover_text = [], [], []
+    for u, v, data in G.edges(data=True):
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
+        edge_hover_x.append((x0 + x1) / 2)
+        edge_hover_y.append((y0 + y1) / 2)
+        edge_hover_text.append(f"<b>{u} ↔ {v}</b><br>{data['weight']} gemeinsame Paper")
+
+    edge_hover_trace = go.Scatter(
+        x=edge_hover_x,
+        y=edge_hover_y,
+        mode="markers",
+        marker=dict(size=10, color="rgba(0,0,0,0)"),
+        hoverinfo="text",
+        hovertext=edge_hover_text,
+        showlegend=False,
+    )
+
+    node_x, node_y, node_text, node_size, node_hover, node_color, node_line_width = (
+        [], [], [], [], [], [], []
+    )
+    freqs = [d.get("freq", 1) for _, d in G.nodes(data=True)]
+    max_freq = max(freqs) if freqs else 1
+
     for node, data in G.nodes(data=True):
         x, y = pos[node]
         node_x.append(x)
         node_y.append(y)
-        node_text.append(node)
         freq = data.get("freq", 1)
-        node_size.append(16 + freq * 3.5)
+        node_size.append(18 + (freq / max_freq) * 42)
         node_hover.append(f"<b>{node}</b><br>Erkannt in {freq} Paper(en)")
+
+        dimmed = node_is_dimmed(node)
+        if node == highlight_theory:
+            node_color.append("#C9A227")
+            node_line_width.append(3)
+        elif dimmed:
+            node_color.append("rgba(180,188,183,0.5)")
+            node_line_width.append(1)
+        else:
+            node_color.append("#2E6F5E")
+            node_line_width.append(1.5)
+
+        if show_all_labels or freq >= max(2, max_freq * 0.35) or node == highlight_theory:
+            node_text.append(node)
+        else:
+            node_text.append("")
 
     node_trace = go.Scatter(
         x=node_x,
@@ -312,22 +427,23 @@ def build_theory_network_figure(pair_counter, freq_counter, min_cooccurrence=1, 
         hoverinfo="text",
         marker=dict(
             size=node_size,
-            color="#2E6F5E",
-            line=dict(width=1.5, color="white"),
+            color=node_color,
+            line=dict(width=node_line_width, color="white"),
         ),
-        textfont=dict(size=11, color="#1F2A24"),
+        textfont=dict(size=12, color="#1F2A24", family="Inter, sans-serif"),
         showlegend=False,
     )
 
-    fig = go.Figure(data=edge_traces + [node_trace])
+    fig = go.Figure(data=edge_traces + [edge_hover_trace, node_trace])
     fig.update_layout(
         margin=dict(l=10, r=10, t=10, b=10),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        height=580,
+        height=620,
         plot_bgcolor="white",
         paper_bgcolor="white",
         hovermode="closest",
+        dragmode="pan",
     )
     return fig
 
@@ -410,6 +526,9 @@ def show_scraper_screen():
             st.error(f"Fehler: {e}")
             return
 
+        # Cache leeren, damit load_papers() / get_enriched_papers() die
+        # frisch gescrapten Daten sofort einlesen, statt alte Cache-Werte
+        # (z.B. ein leeres [] von vor dem ersten Laden) weiterzuverwenden.
         st.cache_data.clear()
         st.session_state.show_scraper = False
         st.success("Daten erfolgreich aktualisiert. Weiter zum Dashboard...")
@@ -424,9 +543,28 @@ def show_dashboard():
     enriched = get_enriched_papers(papers)
     df = pd.DataFrame(enriched)
 
-    if "all_theories" not in df.columns:
-        df["all_theories"] = [[] for _ in range(len(df))]
+    # ---- Absturzsicher: keine/leere Daten ----
+    if df.empty:
+        st.markdown('<div class="app-title">Theorie-Landscape</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="app-subtitle">Circular Economy & Sustainability Orientation</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            """
+            <div class="empty-state">
+                <h4>📭 Es sind noch keine Paper geladen</h4>
+                <p>Wähle in der Seitenleiste Journals aus und lade die Daten, um das Dashboard zu befüllen.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("⬇️ Jetzt Journals laden", type="primary"):
+            st.session_state.show_scraper = True
+            st.rerun()
+        return
 
+    df = ensure_required_columns(df)
     all_theory_names = sorted(count_all_theories(df.to_dict("records")).keys())
 
     # ---------------- Sidebar ----------------
@@ -643,8 +781,9 @@ def show_dashboard():
     st.markdown('<div class="section-header">🕸️ Theorie-Netzwerk</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="section-caption">Zeigt, welche Theorien häufig gemeinsam in einem Abstract '
-        "untersucht werden. Die Linienstärke entspricht der Anzahl gemeinsamer Paper, "
-        "die Knotengröße der Gesamthäufigkeit einer Theorie.</div>",
+        "untersucht werden. Linienstärke = Anzahl gemeinsamer Paper, Knotengröße = Gesamthäufigkeit. "
+        "Zoome, verschiebe und hovere über Knoten/Kanten für Details – oder hebe gezielt eine "
+        "Theorie samt ihrer Verbindungen hervor.</div>",
         unsafe_allow_html=True,
     )
 
@@ -657,26 +796,75 @@ def show_dashboard():
             "Theorien gemeinsam erkannt wurden."
         )
     else:
-        max_possible = max(pair_counter.values())
-        min_co = st.slider(
-            "Mindestanzahl gemeinsamer Nennungen für eine Verbindung",
-            1, max(1, max_possible), 1,
+        net_col1, net_col2, net_col3 = st.columns([1.4, 1.4, 1.4])
+        with net_col1:
+            max_possible = max(pair_counter.values())
+            min_co = st.slider(
+                "Mind. gemeinsame Nennungen je Verbindung",
+                1, max(1, max_possible), 1,
+            )
+        with net_col2:
+            max_nodes_option = st.slider(
+                "Max. Anzahl Theorien im Netzwerk", 5, max(5, len(freq_counter)), min(25, len(freq_counter))
+            )
+        with net_col3:
+            theory_options = ["– keine –"] + sorted(freq_counter.keys())
+            highlight_choice = st.selectbox(
+                "Theorie hervorheben", theory_options,
+                help="Hebt eine Theorie und alle direkt verbundenen Theorien farblich hervor.",
+            )
+            highlight_theory = None if highlight_choice == "– keine –" else highlight_choice
+
+        show_all_labels = st.checkbox(
+            "Alle Beschriftungen anzeigen (statt nur der häufigsten Theorien)", value=True
         )
-        fig = build_theory_network_figure(pair_counter, freq_counter, min_cooccurrence=min_co)
+
+        fig = build_theory_network_figure(
+            pair_counter,
+            freq_counter,
+            min_cooccurrence=min_co,
+            max_nodes=max_nodes_option,
+            highlight_theory=highlight_theory,
+            show_all_labels=show_all_labels,
+        )
 
         if fig is None:
             st.info("Bei dieser Mindestanzahl bleiben keine Verbindungen übrig. Schwelle reduzieren.")
         else:
-            st.plotly_chart(fig, use_container_width=True)
-
-        with st.expander("Häufigste Theorie-Paare als Tabelle anzeigen"):
-            pair_df = pd.DataFrame(
-                [
-                    {"Theorie A": a, "Theorie B": b, "Gemeinsame Paper": c}
-                    for (a, b), c in pair_counter.most_common()
-                ]
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                config={
+                    "scrollZoom": True,
+                    "displaylogo": False,
+                    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                },
             )
-            st.dataframe(pair_df, use_container_width=True, hide_index=True)
+
+        pair_list = pair_counter.most_common()
+        pair_df = pd.DataFrame(
+            [{"Theorie A": a, "Theorie B": b, "Gemeinsame Paper": c} for (a, b), c in pair_list]
+        )
+
+        table_col, chart_col = st.columns([1.3, 1])
+        with table_col:
+            with st.expander("Häufigste Theorie-Paare als Tabelle anzeigen", expanded=False):
+                st.dataframe(pair_df, use_container_width=True, hide_index=True)
+        with chart_col:
+            with st.expander("Top 10 Theorie-Paare als Chart anzeigen", expanded=False):
+                top_pairs = pair_df.head(10).copy()
+                top_pairs["Paar"] = top_pairs["Theorie A"] + " ↔ " + top_pairs["Theorie B"]
+                pair_chart = (
+                    alt.Chart(top_pairs)
+                    .mark_bar(color="#C9A227", cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+                    .encode(
+                        x=alt.X("Gemeinsame Paper:Q"),
+                        y=alt.Y("Paar:N", sort="-x", title=None),
+                        tooltip=["Theorie A", "Theorie B", "Gemeinsame Paper"],
+                    )
+                    .properties(height=320)
+                )
+                st.altair_chart(pair_chart, use_container_width=True)
 
     st.markdown("---")
 
