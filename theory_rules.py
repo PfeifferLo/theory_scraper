@@ -2,10 +2,14 @@
 theory_rules.py
 Regelbasierte Erkennung von Theorien in Paper-Abstracts.
 
-Zwei Methoden werden kombiniert:
+Drei Methoden werden kombiniert:
 1. Feste Liste bekannter Theorien (Dictionary-Matching per Regex)
 2. Signalwörter, die typischerweise vor einer Theoriennennung stehen
    (z.B. "based on", "drawing on", "grounded in") -> Kandidaten-Extraktion
+3. Generische Erkennung: jedes Wort/jede kurze Wortfolge direkt vor einem
+   Theorie-Schlüsselwort ("theory", "view", "model", ...), unabhängig
+   davon, ob die Theorie in KNOWN_THEORIES steht. Fängt z.B. "Game Theory"
+   oder "Equity Theory" ab, auch wenn sie nicht in der festen Liste stehen.
 """
 
 import re
@@ -97,6 +101,79 @@ SIGNAL_PATTERN = re.compile(
 
 
 # -----------------------------------------------------
+# 3. Generische Erkennung: "<Begriff> + Theorie-Schlüsselwort"
+#    Fängt auch Theorien ab, die NICHT in KNOWN_THEORIES stehen
+#    (z.B. "Game Theory", "Equity Theory", "Framing Theory"),
+#    solange direkt "theory/view/model/..." danach steht.
+# -----------------------------------------------------
+
+# Wörter, die NICHT Teil eines Theorienamens sein dürfen -> Abbruchkriterium
+# beim Rückwärtslaufen. Bewusst konservativ gehalten, um False Positives
+# wie "This Theory" oder "Our Theory" zu vermeiden.
+GENERIC_STOPWORDS = {
+    "a", "an", "the", "this", "that", "these", "those", "our", "their",
+    "its", "his", "her", "my", "your", "one", "such", "any", "each",
+    "every", "some", "no", "new", "current", "existing", "prior",
+    "previous", "related", "relevant", "respective", "above",
+    "following", "same", "given", "certain", "particular",
+    "we", "they", "it", "he", "she", "i", "you", "who", "which",
+    "is", "are", "was", "were", "be", "been", "being",
+    "and", "or", "but", "of", "in", "on", "for", "to", "from",
+    "with", "as", "by", "at", "into", "consider", "considering",
+    "considered", "use", "using", "used", "apply", "applying",
+    "applied", "develop", "developing", "developed", "provide",
+    "providing", "paper", "study", "research",
+}
+
+# Theorie-Schlüsselwörter als eigenständige Tokens (kein "approach" etc.
+# doppelt zählen, wenn's schon in KNOWN_THEORIES matched hat)
+GENERIC_THEORY_KEYWORD_RE = re.compile(
+    r"^(theory|theories|view|perspective|model|framework|paradigm)$",
+    re.IGNORECASE,
+)
+
+# Tokenizer: Wörter und Satzzeichen getrennt erfassen, damit wir am
+# Komma/Punkt sauber abbrechen können (z.B. "..., framing theory, ...")
+_TOKEN_RE = re.compile(r"[A-Za-z][\w\-]*|[.,;:()\[\]]")
+
+
+def extract_generic_theories(abstract: str, max_words: int = 3) -> list:
+    """
+    Läuft von jedem Theorie-Schlüsselwort ("theory", "view", "model", ...)
+    rückwärts durch die vorangehenden Wörter und sammelt sie, solange sie
+    keine Satzzeichen oder Füllwörter (GENERIC_STOPWORDS) sind.
+    Dadurch werden auch Theorien erfasst, die nicht in KNOWN_THEORIES
+    stehen (z.B. "Game Theory", "Equity Theory").
+    """
+    if not abstract:
+        return []
+
+    tokens = _TOKEN_RE.findall(abstract)
+    found = []
+
+    for i, tok in enumerate(tokens):
+        if not GENERIC_THEORY_KEYWORD_RE.match(tok):
+            continue
+
+        words = []
+        j = i - 1
+        while j >= 0 and len(words) < max_words:
+            w = tokens[j]
+            if len(w) == 1 and not w.isalnum():  # Satzzeichen -> Stopp
+                break
+            if w.lower() in GENERIC_STOPWORDS:
+                break
+            words.insert(0, w)
+            j -= 1
+
+        if words:  # nur werten, wenn mind. ein sinnvolles Wort davor steht
+            phrase = " ".join(words + [tok])
+            found.append(phrase.title())
+
+    return found
+
+
+# -----------------------------------------------------
 # Extraktion für einen einzelnen Abstract
 # -----------------------------------------------------
 def extract_known_theories(abstract: str) -> list:
@@ -138,9 +215,10 @@ def extract_candidate_theories(abstract: str) -> list:
 
 
 def extract_theories_from_abstract(abstract: str) -> dict:
-    """Kombiniert beide Methoden und gibt strukturiertes Ergebnis zurück."""
+    """Kombiniert alle drei Methoden und gibt strukturiertes Ergebnis zurück."""
     known = extract_known_theories(abstract)
     candidates = extract_candidate_theories(abstract)
+    generic = extract_generic_theories(abstract)
 
     # Kandidaten, die bereits als bekannte Theorie erfasst wurden, nicht doppelt zählen
     candidates_filtered = [
@@ -148,11 +226,26 @@ def extract_theories_from_abstract(abstract: str) -> dict:
         if not any(c.lower() in k.lower() or k.lower() in c.lower() for k in known)
     ]
 
+    # Generische Treffer gegen 'known' und 'candidates' abgleichen, damit
+    # nichts doppelt gezählt wird (z.B. "Stakeholder Theory" käme sonst
+    # sowohl aus known_theories als auch aus generic_theories)
+    already_found = known + candidates_filtered
+    generic_filtered = []
+    seen_lower = set()
+    for g in generic:
+        if any(g.lower() in af.lower() or af.lower() in g.lower() for af in already_found):
+            continue
+        if g.lower() in seen_lower:  # Duplikate innerhalb generic selbst raus
+            continue
+        seen_lower.add(g.lower())
+        generic_filtered.append(g)
+
     return {
         "known_theories": known,
         "candidate_theories": candidates_filtered,
-        "all_theories": known + candidates_filtered,
-        "theory_count": len(known) + len(candidates_filtered),
+        "generic_theories": generic_filtered,  # separat sichtbar für Debugging/Filter
+        "all_theories": known + candidates_filtered + generic_filtered,
+        "theory_count": len(known) + len(candidates_filtered) + len(generic_filtered),
     }
 
 
@@ -218,7 +311,10 @@ if __name__ == "__main__":
         "This study is based on Stakeholder Theory and draws on the "
         "Natural Resource-Based View to examine circular economy practices "
         "and sustainability orientation in manufacturing firms. Grounded in "
-        "institutional theory, we further explore adoption barriers."
+        "institutional theory, we further explore adoption barriers. We "
+        "consider equity theory, framing theory, mental accounting, social "
+        "exchange theory, signaling theory, agency theory, game theory, "
+        "and institutional theory in terms of their implications."
     )
     result = extract_theories_from_abstract(test_abstract)
     print(result)
