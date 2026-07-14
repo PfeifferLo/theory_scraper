@@ -301,21 +301,3 @@ def count_all_theories(enriched_papers: list) -> Counter:
         for theory in paper.get("all_theories", []):
             counter[theory] += 1
     return counter
-
-
-# -----------------------------------------------------
-# Test
-# -----------------------------------------------------
-if __name__ == "__main__":
-    test_abstract = (
-        "This study is based on Stakeholder Theory and draws on the "
-        "Natural Resource-Based View to examine circular economy practices "
-        "and sustainability orientation in manufacturing firms. Grounded in "
-        "institutional theory, we further explore adoption barriers. We "
-        "consider equity theory, framing theory, mental accounting, social "
-        "exchange theory, signaling theory, agency theory, game theory, "
-        "and institutional theory in terms of their implications."
-    )
-    result = extract_theories_from_abstract(test_abstract)
-    print(result)
-    print(check_topic_relevance(test_abstract))
