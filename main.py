@@ -450,6 +450,107 @@ def build_theory_network_figure(
 
 
 # =======================================================
+# Theorie-Trend über Zeit
+# =======================================================
+def compute_theory_trend(df: pd.DataFrame, theories: list) -> pd.DataFrame:
+    """
+    Baut ein Long-Format-DataFrame mit Jahr / Theorie / Anzahl, damit man
+    die Entwicklung einer oder mehrerer Theorien über die Zeit im
+    Liniendiagramm vergleichen kann. Jahre ohne Treffer werden mit 0
+    aufgefüllt, damit die Linien nicht "springen" und Lücken sauber
+    sichtbar sind.
+    """
+    years_present = df["year"].dropna().astype(int)
+    if years_present.empty or not theories:
+        return pd.DataFrame(columns=["Jahr", "Theorie", "Anzahl"])
+
+    year_min, year_max = int(years_present.min()), int(years_present.max())
+    all_years = list(range(year_min, year_max + 1))
+
+    records = []
+    for theory in theories:
+        mask = df["all_theories"].apply(lambda ts: theory in (ts or []))
+        sub = df[mask].dropna(subset=["year"]).assign(year=lambda d: d["year"].astype(int))
+        counts = sub.groupby("year").size().to_dict()
+        for year in all_years:
+            records.append({"Jahr": year, "Theorie": theory, "Anzahl": counts.get(year, 0)})
+
+    return pd.DataFrame(records)
+
+
+def show_theory_trend_section(filtered: pd.DataFrame, all_theory_names: list, theory_counter):
+    """Rendert die Sektion 'Theorie-Trend über Zeit' inkl. Theorie-Filter."""
+    st.markdown('<div class="section-header">📈 Theorie-Trend über Zeit</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Wähle eine oder mehrere Theorien aus, um ihre Entwicklung '
+        "über die Erscheinungsjahre hinweg zu vergleichen. So lässt sich erkennen, welche Theorien "
+        "an Bedeutung gewinnen oder verlieren.</div>",
+        unsafe_allow_html=True,
+    )
+
+    if not all_theory_names:
+        st.info("Für die aktuelle Filterauswahl wurden keine Theorien erkannt.")
+        return
+
+    # Sinnvoller Default: die 3 häufigsten Theorien der aktuellen Filterauswahl
+    default_theories = [t for t, _ in theory_counter.most_common(3)] if theory_counter else []
+
+    trend_col1, trend_col2 = st.columns([2.2, 1])
+    with trend_col1:
+        selected_trend_theories = st.multiselect(
+            "Theorie(n) für den Trend auswählen",
+            options=all_theory_names,
+            default=default_theories,
+            help="Es können auch mehrere Theorien gleichzeitig verglichen werden.",
+        )
+    with trend_col2:
+        cumulative = st.checkbox(
+            "Kumuliert anzeigen",
+            value=False,
+            help="Zeigt statt der jährlichen Anzahl die aufsummierte Gesamtzahl bis zu diesem Jahr.",
+        )
+
+    if not selected_trend_theories:
+        st.info("Bitte mindestens eine Theorie auswählen, um den Trend anzuzeigen.")
+        return
+
+    trend_df = compute_theory_trend(filtered, selected_trend_theories)
+
+    if trend_df.empty or trend_df["Anzahl"].sum() == 0:
+        st.info("Für die ausgewählte(n) Theorie(n) liegen in der aktuellen Filterauswahl keine Daten vor.")
+        return
+
+    if cumulative:
+        trend_df = trend_df.sort_values("Jahr")
+        trend_df["Anzahl"] = trend_df.groupby("Theorie")["Anzahl"].cumsum()
+        y_title = "Kumulierte Anzahl Paper"
+    else:
+        y_title = "Anzahl Paper"
+
+    trend_chart = (
+        alt.Chart(trend_df)
+        .mark_line(point=True, strokeWidth=2.5)
+        .encode(
+            x=alt.X("Jahr:O", title="Erscheinungsjahr"),
+            y=alt.Y("Anzahl:Q", title=y_title),
+            color=alt.Color(
+                "Theorie:N",
+                scale=alt.Scale(scheme="tableau10"),
+                legend=alt.Legend(orient="bottom", title=None),
+            ),
+            tooltip=["Theorie", "Jahr", "Anzahl"],
+        )
+        .properties(height=380)
+        .interactive()
+    )
+    st.altair_chart(trend_chart, use_container_width=True)
+
+    with st.expander("Trend-Daten als Tabelle anzeigen"):
+        pivot = trend_df.pivot(index="Jahr", columns="Theorie", values="Anzahl").reset_index()
+        st.dataframe(pivot, use_container_width=True, hide_index=True)
+
+
+# =======================================================
 # Bildschirm 1: Journal-Auswahl & Ladevorgang
 # =======================================================
 EMAIL_HINT_SHOWN = [False]
@@ -689,6 +790,11 @@ def show_dashboard():
             st.dataframe(theory_df, use_container_width=True, hide_index=True)
     else:
         st.info("Für die aktuelle Filterauswahl wurden keine Theorien erkannt.")
+
+    st.markdown("---")
+
+    # ---------------- Theorie-Trend über Zeit ----------------
+    show_theory_trend_section(filtered, all_theory_names, theory_counter)
 
     st.markdown("---")
 
