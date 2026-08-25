@@ -161,7 +161,14 @@ SIGNAL_PATTERN = re.compile(
 
 # -----------------------------------------------------
 # 3. Generische Erkennung: "<Begriff> + Theorie-Schlüsselwort"
+#    Fängt auch Theorien ab, die NICHT in KNOWN_THEORIES stehen
+#    (z.B. "Game Theory", "Equity Theory", "Framing Theory"),
+#    solange direkt "theory/view/model/..." danach steht.
 # -----------------------------------------------------
+
+# Wörter, die NICHT Teil eines Theorienamens sein dürfen -> Abbruchkriterium
+# beim Rückwärtslaufen. Bewusst konservativ gehalten, um False Positives
+# wie "This Theory" oder "Our Theory" zu vermeiden.
 GENERIC_STOPWORDS = {
     "a", "an", "the", "this", "that", "these", "those", "our", "their",
     "its", "his", "her", "my", "your", "one", "such", "any", "each",
@@ -185,6 +192,8 @@ GENERIC_THEORY_KEYWORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Tokenizer: Wörter und Satzzeichen getrennt erfassen, damit wir am
+# Komma/Punkt sauber abbrechen können (z.B. "..., framing theory, ...")
 _TOKEN_RE = re.compile(r"[A-Za-z][\w\-]*|[.,;:()\[\]]")
 
 
@@ -193,7 +202,9 @@ def extract_generic_theories(abstract: str, max_words: int = 3) -> list:
     Läuft von jedem Theorie-Schlüsselwort ("theory"/"theories", "view"/
     "views", ...) rückwärts durch die vorangehenden Wörter und sammelt sie,
     solange sie keine Satzzeichen oder Füllwörter (GENERIC_STOPWORDS) sind.
-    Ergebnis wird auf Singular normalisiert (normalize_theory_name).
+    Dadurch werden auch Theorien erfasst, die nicht in KNOWN_THEORIES
+    stehen (z.B. "Game Theory", "Equity Theory"). Ergebnis wird auf
+    Singular normalisiert (normalize_theory_name).
     """
     if not abstract:
         return []
@@ -210,3 +221,148 @@ def extract_generic_theories(abstract: str, max_words: int = 3) -> list:
         while j >= 0 and len(words) < max_words:
             w = tokens[j]
             if len(w) == 1 and not w.isalnum():  # Satzzeichen -> Stopp
+                break
+            if w.lower() in GENERIC_STOPWORDS:
+                break
+            words.insert(0, w)
+            j -= 1
+
+        if words:  # nur werten, wenn mind. ein sinnvolles Wort davor steht
+            phrase = " ".join(words + [tok])
+            found.append(normalize_theory_name(phrase.title()))
+
+    return found
+
+
+# -----------------------------------------------------
+# Extraktion für einen einzelnen Abstract
+# -----------------------------------------------------
+def extract_known_theories(abstract: str) -> list:
+    """Sucht nach Treffern aus der festen Theorien-Liste (Singular ODER
+    Plural im Text). Ist eine Theorie Teilstring einer anderen gefundenen
+    Theorie (z.B. 'Resource-Based View' in 'Natural Resource-Based View'),
+    wird nur die spezifischere (längere) behalten."""
+    if not abstract:
+        return []
+    found = []
+    for theory, pattern in KNOWN_THEORY_PATTERNS.items():
+        if pattern.search(abstract):
+            found.append(theory)  # kanonischer Name bleibt Singular
+
+    # Kürzere Treffer entfernen, wenn sie in einem längeren enthalten sind
+    filtered = []
+    for theory in found:
+        is_substring_of_other = any(
+            theory.lower() != other.lower() and theory.lower() in other.lower()
+            for other in found
+        )
+        if not is_substring_of_other:
+            filtered.append(theory)
+    return filtered
+
+
+def extract_candidate_theories(abstract: str) -> list:
+    """Sucht nach Signalwort + Theorie-Muster, um auch unbekannte/neue
+    Theorienbezeichnungen zu erfassen, die nicht in KNOWN_THEORIES stehen.
+    Ergebnis wird auf Singular normalisiert."""
+    if not abstract:
+        return []
+    matches = SIGNAL_PATTERN.findall(abstract)
+    # findall gibt bei Gruppen Tupel zurück -> nur ersten Teil (ganze Phrase) nehmen
+    candidates = []
+    for match in matches:
+        phrase = match[0] if isinstance(match, tuple) else match
+        candidates.append(normalize_theory_name(phrase.strip().title()))
+    return candidates
+
+
+def extract_theories_from_abstract(abstract: str) -> dict:
+    """Kombiniert alle drei Methoden und gibt strukturiertes Ergebnis zurück.
+    Alle Namen sind bereits auf Singular normalisiert, Duplikate (auch über
+    Singular/Plural hinweg) werden herausgefiltert."""
+    known = extract_known_theories(abstract)
+    candidates = extract_candidate_theories(abstract)
+    generic = extract_generic_theories(abstract)
+
+    # Kandidaten, die bereits als bekannte Theorie erfasst wurden, nicht doppelt zählen
+    candidates_filtered = [
+        c for c in candidates
+        if not any(c.lower() in k.lower() or k.lower() in c.lower() for k in known)
+    ]
+
+    # Generische Treffer gegen 'known' und 'candidates' abgleichen, damit
+    # nichts doppelt gezählt wird (z.B. "Stakeholder Theory" käme sonst
+    # sowohl aus known_theories als auch aus generic_theories)
+    already_found = known + candidates_filtered
+    generic_filtered = []
+    seen_lower = set()
+    for g in generic:
+        if any(g.lower() in af.lower() or af.lower() in g.lower() for af in already_found):
+            continue
+        if g.lower() in seen_lower:  # Duplikate innerhalb generic selbst raus
+            continue
+        seen_lower.add(g.lower())
+        generic_filtered.append(g)
+
+    return {
+        "known_theories": known,
+        "candidate_theories": candidates_filtered,
+        "generic_theories": generic_filtered,  # separat sichtbar für Debugging/Filter
+        "all_theories": known + candidates_filtered + generic_filtered,
+        "theory_count": len(known) + len(candidates_filtered) + len(generic_filtered),
+    }
+
+
+# -----------------------------------------------------
+# Zusatz-Check: Circular Economy / Sustainability Orientation
+# -----------------------------------------------------
+CIRCULAR_ECONOMY_KEYWORDS = [
+    "circular economy", "closed-loop", "reuse", "recycling", "remanufactur",
+    "cradle-to-cradle", "circularity", "resource loop", "industrial symbiosis"
+]
+
+SUSTAINABILITY_ORIENTATION_KEYWORDS = [
+    "sustainability orientation", "sustainable orientation",
+    "environmental orientation", "sustainability-oriented",
+    "corporate sustainability", "sustainable development"
+]
+
+
+def check_topic_relevance(abstract: str) -> dict:
+    """Prüft, ob der Abstract Circular-Economy- bzw. Sustainability-Orientation-
+    Begriffe enthält."""
+    if not abstract:
+        return {"circular_economy": False, "sustainability_orientation": False}
+    text = abstract.lower()
+    return {
+        "circular_economy": any(kw in text for kw in CIRCULAR_ECONOMY_KEYWORDS),
+        "sustainability_orientation": any(kw in text for kw in SUSTAINABILITY_ORIENTATION_KEYWORDS),
+    }
+
+
+# -----------------------------------------------------
+# Analyse einer ganzen Paper-Liste
+# -----------------------------------------------------
+def analyze_papers(papers: list) -> list:
+    """Reichert jede Paper-Dict um Theorien- und Themen-Infos an."""
+    enriched = []
+    for paper in papers:
+        abstract = paper.get("abstract", "")
+        theory_result = extract_theories_from_abstract(abstract)
+        topic_result = check_topic_relevance(abstract)
+
+        enriched_paper = dict(paper)  # Kopie, Original nicht verändern
+        enriched_paper.update(theory_result)
+        enriched_paper.update(topic_result)
+        enriched.append(enriched_paper)
+    return enriched
+
+
+def count_all_theories(enriched_papers: list) -> Counter:
+    """Zählt, wie oft jede Theorie über alle Paper hinweg vorkommt.
+    Singular/Plural sind bereits vor dem Zählen vereinheitlicht."""
+    counter = Counter()
+    for paper in enriched_papers:
+        for theory in paper.get("all_theories", []):
+            counter[theory] += 1
+    return counter
