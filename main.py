@@ -450,6 +450,117 @@ def build_theory_network_figure(
 
 
 # =======================================================
+# Theorie vs. Zitationen
+# =======================================================
+def compute_theory_citations(records):
+    """
+    Berechnet je Theorie, wie viele Paper sie enthalten und wie diese Paper
+    in Bezug auf Zitationen abschneiden (Durchschnitt, Median, Summe).
+    Ein Paper mit mehreren Theorien fließt in die Statistik jeder seiner
+    Theorien ein (Mehrfachzählung ist hier gewollt, da wir pro Theorie
+    schauen wollen, wie gut "ihre" Paper zitiert werden).
+    """
+    per_theory_citations = {}
+
+    for r in records:
+        theories = set(r.get("all_theories", []) or [])
+        if not theories:
+            continue
+        citations = r.get("citations", 0) or 0
+        try:
+            citations = int(citations)
+        except (TypeError, ValueError):
+            citations = 0
+        for t in theories:
+            per_theory_citations.setdefault(t, []).append(citations)
+
+    rows = []
+    for theory, cits in per_theory_citations.items():
+        s = pd.Series(cits)
+        rows.append(
+            {
+                "Theorie": theory,
+                "Anzahl Paper": len(cits),
+                "Durchschnittliche Zitationen": round(s.mean(), 1),
+                "Median Zitationen": s.median(),
+                "Summe Zitationen": int(s.sum()),
+                "Max. Zitationen": int(s.max()),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "Theorie", "Anzahl Paper", "Durchschnittliche Zitationen",
+                "Median Zitationen", "Summe Zitationen", "Max. Zitationen",
+            ]
+        )
+
+    return pd.DataFrame(rows).sort_values("Durchschnittliche Zitationen", ascending=False).reset_index(drop=True)
+
+
+def show_theory_citations_section(filtered: pd.DataFrame):
+    """Rendert die Sektion 'Theorie vs. Zitationen'."""
+    st.markdown('<div class="section-header">📊 Theorie vs. Zitationen</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Zeigt, welche Theorien im Schnitt mit stärker zitierten '
+        "Papern verbunden sind. Paper mit mehreren Theorien fließen in die Statistik jeder ihrer "
+        "Theorien ein.</div>",
+        unsafe_allow_html=True,
+    )
+
+    citations_df = compute_theory_citations(filtered.to_dict("records"))
+
+    if citations_df.empty:
+        st.info("Für die aktuelle Filterauswahl liegen keine Theorie-Zitations-Daten vor.")
+        return
+
+    ctrl_col1, ctrl_col2 = st.columns([1.4, 1])
+    with ctrl_col1:
+        max_min_papers = int(citations_df["Anzahl Paper"].max())
+        min_papers = st.slider(
+            "Mind. Anzahl Paper je Theorie",
+            1, max(1, max_min_papers), min(2, max(1, max_min_papers)),
+            help="Blendet Theorien mit sehr wenigen Papern aus, um Ausreißer beim Durchschnitt zu vermeiden.",
+        )
+    with ctrl_col2:
+        sort_metric = st.selectbox(
+            "Sortieren nach",
+            ["Durchschnittliche Zitationen", "Median Zitationen", "Summe Zitationen", "Anzahl Paper"],
+        )
+
+    eligible_df = citations_df[citations_df["Anzahl Paper"] >= min_papers].sort_values(
+        sort_metric, ascending=False
+    )
+
+    if eligible_df.empty:
+        st.info("Bei dieser Mindestanzahl bleiben keine Theorien übrig. Schwelle reduzieren.")
+        return
+
+    top_n = st.slider(
+        "Anzahl angezeigter Theorien",
+        5, min(30, len(eligible_df)), min(15, len(eligible_df)),
+        key="theory_citations_top_n",
+    )
+    top_df = eligible_df.head(top_n)
+
+    chart = (
+        alt.Chart(top_df)
+        .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4, color="#C9A227")
+        .encode(
+            x=alt.X(f"{sort_metric}:Q", title=sort_metric),
+            y=alt.Y("Theorie:N", sort="-x", title=None),
+            tooltip=["Theorie", "Anzahl Paper", "Durchschnittliche Zitationen", "Median Zitationen", "Summe Zitationen"],
+        )
+        .properties(height=max(280, top_n * 26))
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+    with st.expander("Alle Theorien mit Zitationskennzahlen als Tabelle anzeigen"):
+        st.dataframe(eligible_df, use_container_width=True, hide_index=True)
+
+
+# =======================================================
 # Theorie-Trend über Zeit
 # =======================================================
 def compute_theory_trend(df: pd.DataFrame, theories: list) -> pd.DataFrame:
@@ -790,6 +901,11 @@ def show_dashboard():
             st.dataframe(theory_df, use_container_width=True, hide_index=True)
     else:
         st.info("Für die aktuelle Filterauswahl wurden keine Theorien erkannt.")
+
+    st.markdown("---")
+
+    # ---------------- Theorie vs. Zitationen ----------------
+    show_theory_citations_section(filtered)
 
     st.markdown("---")
 
