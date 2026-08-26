@@ -2,6 +2,21 @@
 scraper.py
 Lädt Paper ausgewählter Journals aus OpenAlex und speichert sie als JSON.
 
+NEU in dieser Version:
+- Journal-Liste angepasst: JPIM, R&D Management, Organization & Environment,
+  Journal of Industrial Ecology, Long Range Planning, Academy of Management
+  Journal und Organization Studies wurden hinzugefügt. Industrial Marketing
+  Management und Journal of Purchasing and Supply Management wurden entfernt.
+- Neuer Abschnitt "Theorie-Innovations-Filter": durchsucht Titel + Abstract
+  jedes Papers nach Formulierungen, die typischerweise auf die Entwicklung,
+  Vorstellung oder Erweiterung einer NEUEN/INNOVATIVEN Theorie hindeuten
+  (z.B. "we develop a new theory", "novel theoretical framework", "we
+  propose a theory of ..."). Damit lässt sich aus den gescrapten Papern
+  gezielt die Teilmenge herausfiltern, die potenziell neue theoretische
+  Beiträge liefert. Das ist eine reine Keyword-Heuristik (kein Sprachmodell)
+  – sie eignet sich als Vorfilter/Ranking, ersetzt aber kein inhaltliches
+  Gegenlesen der Treffer.
+
 WICHTIG (Streamlit Community Cloud):
 Das Dateisystem dort ist NICHT persistent. Bei jedem Redeploy / Git-Push /
 "Aufwachen" nach Inaktivität wird der Container frisch aus dem GitHub-Repo
@@ -22,6 +37,7 @@ dann einfach übersprungen (mit einem Hinweis in der Konsole/im Log).
 import base64
 import json
 import os
+import re
 import time
 
 import requests
@@ -73,14 +89,16 @@ if not EMAIL:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
+# -----------------------------------------------------
+# Journal-Liste
+# -----------------------------------------------------
+# Entfernt: Industrial Marketing Management (IMM), Journal of Purchasing and
+# Supply Management (JPM).
+# Neu hinzugefügt: JPIM, RDM, OAE, JIE, LRP, AMJ, ORS.
 JOURNALS = {
     "BSE": {
         "name": "Business Strategy and the Environment",
         "issn": "0964-4733"
-    },
-    "JPM": {
-        "name": "Journal of Purchasing and Supply Management",
-        "issn": "1478-4092"
     },
     "JCP": {
         "name": "Journal of Cleaner Production",
@@ -90,9 +108,39 @@ JOURNALS = {
         "name": "Resources, Conservation and Recycling",
         "issn": "0921-3449"
     },
-    "IMM": {
-        "name": "Industrial Marketing Management",
-        "issn": "0019-8501"
+    "JPIM": {
+        "name": "Journal of Product Innovation Management",
+        "issn": "0737-6782"
+    },
+    "RDM": {
+        "name": "R&D Management",
+        "issn": "0033-6807"
+    },
+    "OAE": {
+        "name": "Organization & Environment",
+        "issn": "1086-0266"
+    },
+    "JIE": {
+        "name": "Journal of Industrial Ecology",
+        "issn": "1088-1980"
+    },
+    "LRP": {
+        "name": "Long Range Planning",
+        "issn": "0024-6301"
+    },
+    "AMJ": {
+        # Hinweis: "Academy of Management" ist selbst kein Zeitschriftentitel,
+        # sondern der Verband, der u.a. AMJ, AMR, AMD, AMLE, AMP herausgibt.
+        # Hier wurde das Flaggschiff-Journal "Academy of Management Journal"
+        # verwendet. Falls stattdessen z.B. die "Academy of Management
+        # Review" (ISSN 0363-7425) gemeint war, einfach den ISSN-Wert unten
+        # austauschen.
+        "name": "Academy of Management Journal",
+        "issn": "0001-4273"
+    },
+    "ORS": {
+        "name": "Organization Studies",
+        "issn": "0170-8406"
     }
 }
 
@@ -191,15 +239,23 @@ def scrape_journal(journal_code, progress_callback=None):
                 if "author" in authorship:
                     authors.append(authorship["author"]["display_name"])
 
+            abstract = reconstruct_abstract(work.get("abstract_inverted_index"))
+            title = work.get("title", "") or ""
+
             papers.append({
                 "journal_code": journal_code,
                 "journal_name": journal["name"],
-                "title": work.get("title", ""),
+                "title": title,
                 "year": work.get("publication_year"),
                 "doi": work.get("doi", ""),
                 "authors": authors,
                 "citations": work.get("cited_by_count", 0),
-                "abstract": reconstruct_abstract(work.get("abstract_inverted_index"))
+                "abstract": abstract,
+                # Theorie-Innovations-Heuristik direkt beim Scrapen mit
+                # abspeichern, damit main.py / die UI nicht bei jedem Laden
+                # neu durch alle Texte gehen muss.
+                "theory_innovation_score": theory_innovation_score(title, abstract),
+                "theory_innovation_keywords": matched_theory_keywords(title, abstract)
             })
 
         print(f"  {len(papers)} Paper geladen...")
@@ -222,6 +278,99 @@ def scrape_journal(journal_code, progress_callback=None):
 
 
 # -----------------------------------------------------
+# Theorie-Innovations-Filter
+# -----------------------------------------------------
+# Ziel: aus der Masse gescrapter Paper diejenigen herausfiltern, die
+# vermutlich eine NEUE / INNOVATIVE Theorie vorschlagen, entwickeln oder
+# erweitern – im Gegensatz zu Papern, die nur eine bestehende Theorie
+# empirisch anwenden oder testen.
+#
+# Ansatz: Keyword-/Phrasen-Heuristik auf Titel + Abstract. Jede Phrase hat
+# ein Gewicht (höheres Gewicht = stärkeres Signal für "neue Theorie").
+# Das Ergebnis ist ein einfacher Score, kein Ersatz für Lesen des Papers,
+# aber gut geeignet, um vorzusortieren/zu ranken.
+THEORY_INNOVATION_PATTERNS = [
+    # Sehr starke Signale: explizite Ankündigung einer neuen Theorie
+    (r"\bnew\s+theor\w*\b", 3),
+    (r"\bnovel\s+theor\w*\b", 3),
+    (r"\bemerging\s+theor\w*\b", 2),
+    (r"\bwe\s+(develop|propose|introduce|advance|put\s+forward)\s+a\s+(new|novel)?\s*theor\w*\b", 3),
+    (r"\bthis\s+(paper|article|study)\s+(develops?|proposes?|introduces?|advances?)\s+a\s+(new|novel)?\s*theor\w*\b", 3),
+    (r"\btheory\s+building\b", 2),
+    (r"\btheory\s+development\b", 2),
+    (r"\btheoretical\s+contribution\w*\b", 2),
+    (r"\btowards?\s+a\s+theory\s+of\b", 3),
+    (r"\btoward\s+a\s+new\s+theory\b", 3),
+    (r"\bconceptual\s+framework\b", 1),
+    (r"\bnovel\s+(conceptual|theoretical)\s+framework\b", 3),
+    (r"\bnew\s+(conceptual|theoretical)\s+(framework|model|lens|perspective)\b", 3),
+    (r"\bextend(s|ing)?\s+.{0,40}\btheory\b", 2),
+    (r"\bchalleng(e|es|ing)\s+.{0,40}\btheory\b", 2),
+    (r"\breconceptualiz\w*\b", 2),
+    (r"\bparadigm\s+shift\b", 2),
+    (r"\bnew\s+(construct|typology|taxonomy)\b", 2),
+    (r"\bgrounded\s+theory\b", 1),
+    (r"\bmid-?range\s+theory\b", 2),
+    (r"\bmiddle-?range\s+theory\b", 2),
+    (r"\bintegrat\w*\s+.{0,30}\btheories\b", 1),
+    (r"\bbridg\w*\s+.{0,30}\btheor\w*\b", 1),
+]
+
+_COMPILED_THEORY_PATTERNS = [(re.compile(p, re.IGNORECASE), w) for p, w in THEORY_INNOVATION_PATTERNS]
+
+
+def theory_innovation_score(title, abstract):
+    """
+    Berechnet einen einfachen Score dafür, wie stark ein Paper (laut Titel +
+    Abstract) auf die Entwicklung einer neuen/innovativen Theorie hindeutet.
+    0 = keine Signale gefunden. Je höher, desto mehr/stärkere Signale.
+    """
+    text = f"{title or ''} {abstract or ''}"
+    score = 0
+    for pattern, weight in _COMPILED_THEORY_PATTERNS:
+        matches = pattern.findall(text)
+        if matches:
+            score += weight * len(matches)
+    return score
+
+
+def matched_theory_keywords(title, abstract):
+    """Gibt zurück, welche Theorie-Innovations-Phrasen im Text gefunden wurden
+    (für Nachvollziehbarkeit / Debugging / Anzeige in der UI)."""
+    text = f"{title or ''} {abstract or ''}"
+    found = []
+    for pattern, _weight in _COMPILED_THEORY_PATTERNS:
+        if pattern.search(text):
+            found.append(pattern.pattern)
+    return found
+
+
+def filter_theory_innovative_papers(papers, min_score=1):
+    """
+    Filtert aus einer Liste von Paper-Dicts diejenigen heraus, die (laut
+    theory_innovation_score) mindestens min_score Punkte erreichen, und
+    sortiert absteigend nach Score. So bekommt man eine priorisierte Liste
+    der Paper, die am ehesten neue/innovative Theorien enthalten.
+
+    Funktioniert sowohl mit frisch gescrapten Papern (die den Score schon
+    als Feld haben) als auch mit älteren, bereits gespeicherten Papern ohne
+    dieses Feld (Score wird dann on-the-fly nachberechnet).
+    """
+    scored = []
+    for p in papers:
+        score = p.get("theory_innovation_score")
+        if score is None:
+            score = theory_innovation_score(p.get("title", ""), p.get("abstract", ""))
+        if score >= min_score:
+            p_out = dict(p)
+            p_out["theory_innovation_score"] = score
+            scored.append(p_out)
+
+    scored.sort(key=lambda p: p["theory_innovation_score"], reverse=True)
+    return scored
+
+
+# -----------------------------------------------------
 # Ergebnisse als JSON speichern
 # -----------------------------------------------------
 def save_papers(papers, journal_code):
@@ -238,6 +387,20 @@ def save_combined(all_papers):
     with open(combined_path, "w", encoding="utf-8") as f:
         json.dump(all_papers, f, ensure_ascii=False, indent=2)
     return combined_path
+
+
+def save_theory_innovative_papers(all_papers, min_score=1):
+    """Speichert zusätzlich eine gefilterte/sortierte Datei mit nur den
+    Papern, die theoretische Innovations-Signale enthalten – praktisch, um
+    sich schnell einen Überblick über die "interessanten" Paper zu
+    verschaffen, ohne jedes Mal neu filtern zu müssen."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    filtered = filter_theory_innovative_papers(all_papers, min_score=min_score)
+    filepath = os.path.join(DATA_DIR, "theory_innovative_papers.json")
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(filtered, f, ensure_ascii=False, indent=2)
+    print(f"{len(filtered)} potenziell theorie-innovative Paper gespeichert unter {filepath}")
+    return filepath, filtered
 
 
 # -----------------------------------------------------
@@ -346,6 +509,10 @@ def scrape_selected(journal_codes, status_callback=None):
     all_papers = kept + new_papers
     combined_path = save_combined(all_papers)
 
+    # Zusätzlich eine vorsortierte "Theorie-Innovation"-Liste ablegen, damit
+    # man sich sofort die vielversprechendsten Paper ansehen kann.
+    save_theory_innovative_papers(all_papers, min_score=1)
+
     # Daten persistent machen, damit sie einen Streamlit-Cloud-Neustart
     # überleben (siehe Docstring von push_data_to_github).
     push_data_to_github(
@@ -373,3 +540,9 @@ if __name__ == "__main__":
 
     all_papers = scrape_all()
     print(f"\nGesamt über alle Journals: {len(all_papers)} Paper")
+
+    theorie_top = filter_theory_innovative_papers(all_papers, min_score=1)
+    print(f"Davon mit Theorie-Innovations-Signalen: {len(theorie_top)} Paper")
+    print("\nTop 10 nach Theorie-Innovations-Score:")
+    for p in theorie_top[:10]:
+        print(f"  [{p['theory_innovation_score']:>2}] {p['journal_code']}: {p['title']}")
