@@ -1,22 +1,12 @@
 """
 main.py
-Streamlit-Dashboard: Auswahl & Download von Papern und Analyse der darin
-erkannten Theorien – mit besonderem Fokus auf INNOVATIVE / NEUE Theorien.
-
-Struktur:
-1. Übersicht (Overview) mit Kennzahlen, Häufigkeitschart, Trend und
-   Verteilung.
-2. Innovative Theorien – eigener Tab, in dem als neu markierte Theorien
-   und die dazugehörigen Paper prominent präsentiert werden.
-3. Emerging Candidates – Theorien, die NICHT in der bekannten Liste
-   stehen, aber sauber erkannt wurden (potentiell neue Konzepte).
-4. Netzwerk – gemeinsames Auftreten von Theorien.
-5. Paper – volle Detailtabelle und Suche.
+Streamlit-Dashboard: Auswahl & Download von Papern ausgewählter Journals
+sowie Analyse der darin erkannten Theorien rund um Circular Economy &
+Sustainability Orientation.
 """
 
 import json
 import os
-import re
 from collections import Counter
 from itertools import combinations
 
@@ -27,18 +17,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from scraper import JOURNALS, scrape_selected
-from theory_rules import (
-    analyze_papers,
-    count_all_theories,
-    count_innovative_theories,
-    count_emerging_candidates,
-    KNOWN_THEORIES,
-)
+from theory_rules import analyze_papers, count_all_theories
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 COMBINED_FILE = os.path.join(DATA_DIR, "all_papers.json")
 
+# Spalten, die das Dashboard mindestens erwartet. Fehlt eine davon (z.B. weil
+# analyze_papers() sie in Einzelfällen nicht liefert), wird sie mit einem
+# sinnvollen Default ergänzt, statt dass die App mit einem KeyError abstürzt.
 REQUIRED_COLUMNS = {
     "title": "",
     "authors": None,
@@ -51,21 +38,8 @@ REQUIRED_COLUMNS = {
     "circular_economy": False,
     "sustainability_orientation": False,
     "theory_count": 0,
-    "all_theories": None,
-    "known_theories": None,
-    "candidate_theories": None,
-    "generic_theories": None,
-    "emerging_candidates": None,
-    "innovative_theories": None,
-    "has_innovative_theory": False,
-    "innovation_confidence": 0.0,
-    "novelty_signal_count": 0,
-    "unnamed_innovative_count": 0,
-    "theory_innovation_score": 0,
-    "novelty_snippets": None,
+    "all_theories": None,  # wird unten separat als Liste behandelt
 }
-
-KNOWN_LOWER = {t.lower() for t in KNOWN_THEORIES}
 
 st.set_page_config(
     page_title="Theorie-Landscape: Circular Economy & Sustainability",
@@ -83,70 +57,111 @@ def inject_css():
         """
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-        html, body, [class*="css"]  { font-family: 'Inter', sans-serif; }
+
+        html, body, [class*="css"]  {
+            font-family: 'Inter', sans-serif;
+        }
+
         :root {
             --brand-primary: #2E6F5E;
             --brand-primary-light: #E7F2EE;
             --brand-accent: #C9A227;
-            --brand-accent-light: #FBF3DC;
             --brand-ink: #1F2A24;
             --brand-muted: #6B7A72;
         }
-        .block-container { padding-top: 2rem; padding-bottom: 3rem; }
+
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+        }
+
         .app-title {
-            font-size: 2.1rem; font-weight: 800; color: var(--brand-ink);
-            margin-bottom: 0.15rem; letter-spacing: -0.02em;
+            font-size: 2.1rem;
+            font-weight: 800;
+            color: var(--brand-ink);
+            margin-bottom: 0.15rem;
+            letter-spacing: -0.02em;
         }
         .app-subtitle {
-            font-size: 1rem; color: var(--brand-muted); margin-bottom: 1.5rem;
+            font-size: 1rem;
+            color: var(--brand-muted);
+            margin-bottom: 1.5rem;
         }
+
         .metric-card {
-            background: white; border: 1px solid #E7EAE8;
-            border-radius: 14px; padding: 1.1rem 1.3rem;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.04); height: 100%;
-        }
-        .metric-card.accent {
-            border: 1px solid var(--brand-accent);
-            background: linear-gradient(180deg, #FDF9EA 0%, #FFFFFF 100%);
+            background: white;
+            border: 1px solid #E7EAE8;
+            border-radius: 14px;
+            padding: 1.1rem 1.3rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+            height: 100%;
         }
         .metric-label {
-            font-size: 0.8rem; font-weight: 600; color: var(--brand-muted);
-            text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.3rem;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--brand-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-bottom: 0.3rem;
         }
         .metric-value {
-            font-size: 1.9rem; font-weight: 800; color: var(--brand-ink);
+            font-size: 1.9rem;
+            font-weight: 800;
+            color: var(--brand-ink);
         }
         .metric-sub {
-            font-size: 0.8rem; color: var(--brand-accent);
-            font-weight: 600; margin-top: 0.2rem;
+            font-size: 0.8rem;
+            color: var(--brand-accent);
+            font-weight: 600;
+            margin-top: 0.2rem;
         }
+
         .section-header {
-            font-size: 1.25rem; font-weight: 700; color: var(--brand-ink);
-            margin-top: 0.5rem; margin-bottom: 0.2rem;
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--brand-ink);
+            margin-top: 0.5rem;
+            margin-bottom: 0.2rem;
         }
         .section-caption {
-            color: var(--brand-muted); font-size: 0.88rem; margin-bottom: 0.8rem;
+            color: var(--brand-muted);
+            font-size: 0.88rem;
+            margin-bottom: 0.8rem;
         }
+
         .journal-card {
-            background: white; border: 1px solid #E7EAE8;
-            border-radius: 12px; padding: 1rem 1.1rem; margin-bottom: 0.6rem;
+            background: white;
+            border: 1px solid #E7EAE8;
+            border-radius: 12px;
+            padding: 1rem 1.1rem;
+            margin-bottom: 0.6rem;
         }
         .journal-card-title {
-            font-weight: 700; color: var(--brand-ink); font-size: 0.95rem;
+            font-weight: 700;
+            color: var(--brand-ink);
+            font-size: 0.95rem;
         }
         .journal-card-code {
-            display: inline-block; background: var(--brand-primary-light);
-            color: var(--brand-primary); font-weight: 700; font-size: 0.72rem;
-            padding: 0.15rem 0.5rem; border-radius: 6px; margin-right: 0.5rem;
+            display: inline-block;
+            background: var(--brand-primary-light);
+            color: var(--brand-primary);
+            font-weight: 700;
+            font-size: 0.72rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 6px;
+            margin-right: 0.5rem;
         }
+
         div.stButton > button {
-            border-radius: 10px; font-weight: 600;
+            border-radius: 10px;
+            font-weight: 600;
             border: 1px solid var(--brand-primary);
         }
         div.stButton > button[kind="primary"] {
             background-color: var(--brand-primary);
             border: 1px solid var(--brand-primary);
         }
+
         .badge-ce {
             background: #E7F2EE; color: #2E6F5E;
             padding: 0.1rem 0.5rem; border-radius: 6px;
@@ -155,35 +170,28 @@ def inject_css():
         .badge-so {
             background: #FBF3DC; color: #93731A;
             padding: 0.1rem 0.5rem; border-radius: 6px;
-            font-size: 0.75rem; font-weight: 700; margin-right: 0.3rem;
+            font-size: 0.75rem; font-weight: 700;
         }
-        .badge-innov {
-            background: #FCE9C6; color: #7A5A0A;
-            padding: 0.1rem 0.5rem; border-radius: 6px;
-            font-size: 0.75rem; font-weight: 700; margin-right: 0.3rem;
+
+        .result-card {
+            background: white;
+            border: 1px solid #E7EAE8;
+            border-radius: 12px;
+            padding: 0.2rem 0.2rem;
+            margin-bottom: 0.5rem;
         }
-        .badge-known {
-            background: #E7F2EE; color: #2E6F5E;
-            padding: 0.1rem 0.5rem; border-radius: 6px;
-            font-size: 0.75rem; font-weight: 700; margin-right: 0.3rem;
-        }
-        .badge-emerging {
-            background: #F1E9F9; color: #6B3FA0;
-            padding: 0.1rem 0.5rem; border-radius: 6px;
-            font-size: 0.75rem; font-weight: 700; margin-right: 0.3rem;
+        .authors-line {
+            color: var(--brand-muted);
+            font-size: 0.85rem;
+            margin-bottom: 0.4rem;
         }
         .empty-state {
-            background: white; border: 1px dashed #C7D1CB;
-            border-radius: 14px; padding: 2.2rem 1.6rem;
-            text-align: center; color: var(--brand-muted);
-        }
-        .snippet-box {
-            background: #FDF9EA; border-left: 4px solid var(--brand-accent);
-            padding: 0.6rem 0.8rem; margin: 0.3rem 0;
-            border-radius: 6px; font-size: 0.88rem; color: var(--brand-ink);
-        }
-        mark.novelty {
-            background: #FCE9C6; padding: 0.05rem 0.2rem; border-radius: 3px;
+            background: white;
+            border: 1px dashed #C7D1CB;
+            border-radius: 14px;
+            padding: 2.2rem 1.6rem;
+            text-align: center;
+            color: var(--brand-muted);
         }
         </style>
         """,
@@ -191,12 +199,11 @@ def inject_css():
     )
 
 
-def metric_card(label, value, sub=None, accent=False):
+def metric_card(label, value, sub=None):
     sub_html = f'<div class="metric-sub">{sub}</div>' if sub else ""
-    cls = "metric-card accent" if accent else "metric-card"
     st.markdown(
         f"""
-        <div class="{cls}">
+        <div class="metric-card">
             <div class="metric-label">{label}</div>
             <div class="metric-value">{value}</div>
             {sub_html}
@@ -207,9 +214,10 @@ def metric_card(label, value, sub=None, accent=False):
 
 
 # =======================================================
-# Helper: Autoren
+# Hilfsfunktionen für Autoren
 # =======================================================
 def get_authors_list(row):
+    """Gibt die Autorenliste eines Papers robust zurück (auch wenn das Feld fehlt)."""
     authors = row.get("authors", None) if hasattr(row, "get") else None
     if isinstance(authors, list):
         return [a for a in authors if a]
@@ -223,29 +231,6 @@ def format_authors(authors, max_shown=4):
         return ", ".join(authors)
     shown = ", ".join(authors[:max_shown])
     return f"{shown} et al. ({len(authors)} Autor:innen gesamt)"
-
-
-# =======================================================
-# Helper: Highlighting im Abstract
-# =======================================================
-NOVELTY_RE = re.compile(
-    r"\b(new|novel|emerging|innovative|original|unprecedented|groundbreaking|"
-    r"pioneering|nascent|alternative|propose[sd]?|develop(?:s|ed)?|"
-    r"introduc(?:e|es|ed)|toward(?:s)?|theory building|theory development|"
-    r"reconceptualiz\w*|paradigm shift)\b",
-    re.IGNORECASE,
-)
-
-
-def highlight_novelty(text: str) -> str:
-    if not text:
-        return ""
-    safe = (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-    return NOVELTY_RE.sub(lambda m: f'<mark class="novelty">{m.group(0)}</mark>', safe)
 
 
 # =======================================================
@@ -270,58 +255,73 @@ def available_journal_codes():
 
 
 def ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
-    list_columns = {
-        "all_theories", "known_theories", "candidate_theories",
-        "generic_theories", "emerging_candidates", "innovative_theories",
-        "novelty_snippets", "authors",
-    }
+    """
+    Stellt sicher, dass alle vom Dashboard benötigten Spalten existieren –
+    verhindert KeyError/Absturz, wenn analyze_papers() mal ein Feld nicht
+    liefert oder df leer ist.
+    """
     for col, default in REQUIRED_COLUMNS.items():
         if col not in df.columns:
-            if col in list_columns:
+            if col == "all_theories":
                 df[col] = [[] for _ in range(len(df))]
             else:
                 df[col] = default
-    for col in list_columns:
-        if col in df.columns:
-            df[col] = df[col].apply(lambda v: v if isinstance(v, list) else [])
+    # all_theories kann als None statt [] vorliegen -> normalisieren
+    df["all_theories"] = df["all_theories"].apply(lambda v: v if isinstance(v, list) else [])
     return df
 
 
 # =======================================================
-# Netzwerk-Analyse
+# Netzwerk-Analyse: gemeinsames Auftreten von Theorien
 # =======================================================
 def compute_theory_cooccurrence(records):
+    """
+    Zählt, wie oft je zwei Theorien gemeinsam im selben Abstract erkannt wurden,
+    sowie die Gesamthäufigkeit jeder einzelnen Theorie.
+    """
     pair_counter = Counter()
     freq_counter = Counter()
+
     for r in records:
         theories = sorted(set(r.get("all_theories", []) or []))
         for t in theories:
             freq_counter[t] += 1
         for a, b in combinations(theories, 2):
             pair_counter[(a, b)] += 1
+
     return pair_counter, freq_counter
 
 
 def build_theory_network_figure(
-    pair_counter, freq_counter,
-    min_cooccurrence=1, max_nodes=40,
-    highlight_theory=None, show_all_labels=True,
-    innovative_set=None,
+    pair_counter,
+    freq_counter,
+    min_cooccurrence=1,
+    max_nodes=40,
+    highlight_theory=None,
+    show_all_labels=True,
 ):
-    innovative_set = innovative_set or set()
+    """Baut eine interaktive Plotly-Netzwerkgrafik der Theorie-Co-Occurrence."""
     G = nx.Graph()
+
+    # nur die häufigsten Theorien berücksichtigen, damit das Netzwerk lesbar bleibt
     top_theories = {t for t, _ in freq_counter.most_common(max_nodes)}
+
     for t, f in freq_counter.items():
         if t in top_theories:
             G.add_node(t, freq=f)
+
     for (a, b), c in pair_counter.items():
         if c >= min_cooccurrence and a in top_theories and b in top_theories:
             G.add_edge(a, b, weight=c)
+
     G.remove_nodes_from(list(nx.isolates(G)))
 
     if G.number_of_nodes() == 0:
         return None
 
+    # Kamada-Kawai liefert für diese Art von Netzwerken meist deutlich
+    # klarere, weniger überlappende Layouts als spring_layout. Fällt das
+    # Netzwerk in mehrere unverbundene Teile, weichen wir auf spring_layout aus.
     try:
         if nx.is_connected(G):
             pos = nx.kamada_kawai_layout(G)
@@ -333,6 +333,7 @@ def build_theory_network_figure(
     weights = [d["weight"] for _, _, d in G.edges(data=True)]
     max_w = max(weights) if weights else 1
 
+    # Wenn eine Theorie hervorgehoben werden soll: Nachbarschaft bestimmen
     highlighted_neighbors = set()
     if highlight_theory and highlight_theory in G.nodes:
         highlighted_neighbors = set(G.neighbors(highlight_theory)) | {highlight_theory}
@@ -357,47 +358,60 @@ def build_theory_network_figure(
         base_opacity = 0.12 if dimmed else (0.3 + 0.55 * (w / max_w))
         color = f"rgba(150,160,155,{base_opacity:.2f})" if dimmed else f"rgba(46,111,94,{base_opacity:.2f})"
         edge_traces.append(
-            go.Scatter(x=[x0, x1, None], y=[y0, y1, None], mode="lines",
-                       line=dict(width=width, color=color),
-                       hoverinfo="skip", showlegend=False)
+            go.Scatter(
+                x=[x0, x1, None],
+                y=[y0, y1, None],
+                mode="lines",
+                line=dict(width=width, color=color),
+                hoverinfo="skip",
+                showlegend=False,
+            )
         )
 
+    # unsichtbare Hover-Punkte in der Mitte jeder Kante, damit man die
+    # Anzahl gemeinsamer Paper beim Hovern über die Verbindung sehen kann
     edge_hover_x, edge_hover_y, edge_hover_text = [], [], []
     for u, v, data in G.edges(data=True):
-        x0, y0 = pos[u]; x1, y1 = pos[v]
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
         edge_hover_x.append((x0 + x1) / 2)
         edge_hover_y.append((y0 + y1) / 2)
         edge_hover_text.append(f"<b>{u} ↔ {v}</b><br>{data['weight']} gemeinsame Paper")
 
     edge_hover_trace = go.Scatter(
-        x=edge_hover_x, y=edge_hover_y, mode="markers",
+        x=edge_hover_x,
+        y=edge_hover_y,
+        mode="markers",
         marker=dict(size=10, color="rgba(0,0,0,0)"),
-        hoverinfo="text", hovertext=edge_hover_text, showlegend=False,
+        hoverinfo="text",
+        hovertext=edge_hover_text,
+        showlegend=False,
     )
 
-    node_x, node_y, node_text, node_size = [], [], [], []
-    node_hover, node_color, node_line_width = [], [], []
+    node_x, node_y, node_text, node_size, node_hover, node_color, node_line_width = (
+        [], [], [], [], [], [], []
+    )
     freqs = [d.get("freq", 1) for _, d in G.nodes(data=True)]
     max_freq = max(freqs) if freqs else 1
 
     for node, data in G.nodes(data=True):
         x, y = pos[node]
-        node_x.append(x); node_y.append(y)
+        node_x.append(x)
+        node_y.append(y)
         freq = data.get("freq", 1)
         node_size.append(18 + (freq / max_freq) * 42)
-        is_novel = node in innovative_set
-        badge = " · 🆕 innovativ" if is_novel else ""
-        node_hover.append(f"<b>{node}</b>{badge}<br>Erkannt in {freq} Paper(en)")
+        node_hover.append(f"<b>{node}</b><br>Erkannt in {freq} Paper(en)")
 
         dimmed = node_is_dimmed(node)
         if node == highlight_theory:
-            node_color.append("#C9A227"); node_line_width.append(3)
+            node_color.append("#C9A227")
+            node_line_width.append(3)
         elif dimmed:
-            node_color.append("rgba(180,188,183,0.5)"); node_line_width.append(1)
-        elif is_novel:
-            node_color.append("#C9A227"); node_line_width.append(2)
+            node_color.append("rgba(180,188,183,0.5)")
+            node_line_width.append(1)
         else:
-            node_color.append("#2E6F5E"); node_line_width.append(1.5)
+            node_color.append("#2E6F5E")
+            node_line_width.append(1.5)
 
         if show_all_labels or freq >= max(2, max_freq * 0.35) or node == highlight_theory:
             node_text.append(node)
@@ -405,11 +419,18 @@ def build_theory_network_figure(
             node_text.append("")
 
     node_trace = go.Scatter(
-        x=node_x, y=node_y, mode="markers+text",
-        text=node_text, textposition="top center",
-        hovertext=node_hover, hoverinfo="text",
-        marker=dict(size=node_size, color=node_color,
-                    line=dict(width=node_line_width, color="white")),
+        x=node_x,
+        y=node_y,
+        mode="markers+text",
+        text=node_text,
+        textposition="top center",
+        hovertext=node_hover,
+        hoverinfo="text",
+        marker=dict(
+            size=node_size,
+            color=node_color,
+            line=dict(width=node_line_width, color="white"),
+        ),
         textfont=dict(size=12, color="#1F2A24", family="Inter, sans-serif"),
         showlegend=False,
     )
@@ -419,21 +440,33 @@ def build_theory_network_figure(
         margin=dict(l=10, r=10, t=10, b=10),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        height=620, plot_bgcolor="white", paper_bgcolor="white",
-        hovermode="closest", dragmode="pan",
+        height=620,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        hovermode="closest",
+        dragmode="pan",
     )
     return fig
 
 
 # =======================================================
-# Theorie-Trend
+# Theorie-Trend über Zeit
 # =======================================================
 def compute_theory_trend(df: pd.DataFrame, theories: list) -> pd.DataFrame:
+    """
+    Baut ein Long-Format-DataFrame mit Jahr / Theorie / Anzahl, damit man
+    die Entwicklung einer oder mehrerer Theorien über die Zeit im
+    Liniendiagramm vergleichen kann. Jahre ohne Treffer werden mit 0
+    aufgefüllt, damit die Linien nicht "springen" und Lücken sauber
+    sichtbar sind.
+    """
     years_present = df["year"].dropna().astype(int)
     if years_present.empty or not theories:
         return pd.DataFrame(columns=["Jahr", "Theorie", "Anzahl"])
+
     year_min, year_max = int(years_present.min()), int(years_present.max())
     all_years = list(range(year_min, year_max + 1))
+
     records = []
     for theory in theories:
         mask = df["all_theories"].apply(lambda ts: theory in (ts or []))
@@ -441,11 +474,84 @@ def compute_theory_trend(df: pd.DataFrame, theories: list) -> pd.DataFrame:
         counts = sub.groupby("year").size().to_dict()
         for year in all_years:
             records.append({"Jahr": year, "Theorie": theory, "Anzahl": counts.get(year, 0)})
+
     return pd.DataFrame(records)
 
 
+def show_theory_trend_section(filtered: pd.DataFrame, all_theory_names: list, theory_counter):
+    """Rendert die Sektion 'Theorie-Trend über Zeit' inkl. Theorie-Filter."""
+    st.markdown('<div class="section-header">📈 Theorie-Trend über Zeit</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Wähle eine oder mehrere Theorien aus, um ihre Entwicklung '
+        "über die Erscheinungsjahre hinweg zu vergleichen. So lässt sich erkennen, welche Theorien "
+        "an Bedeutung gewinnen oder verlieren.</div>",
+        unsafe_allow_html=True,
+    )
+
+    if not all_theory_names:
+        st.info("Für die aktuelle Filterauswahl wurden keine Theorien erkannt.")
+        return
+
+    # Sinnvoller Default: die 3 häufigsten Theorien der aktuellen Filterauswahl
+    default_theories = [t for t, _ in theory_counter.most_common(3)] if theory_counter else []
+
+    trend_col1, trend_col2 = st.columns([2.2, 1])
+    with trend_col1:
+        selected_trend_theories = st.multiselect(
+            "Theorie(n) für den Trend auswählen",
+            options=all_theory_names,
+            default=default_theories,
+            help="Es können auch mehrere Theorien gleichzeitig verglichen werden.",
+        )
+    with trend_col2:
+        cumulative = st.checkbox(
+            "Kumuliert anzeigen",
+            value=False,
+            help="Zeigt statt der jährlichen Anzahl die aufsummierte Gesamtzahl bis zu diesem Jahr.",
+        )
+
+    if not selected_trend_theories:
+        st.info("Bitte mindestens eine Theorie auswählen, um den Trend anzuzeigen.")
+        return
+
+    trend_df = compute_theory_trend(filtered, selected_trend_theories)
+
+    if trend_df.empty or trend_df["Anzahl"].sum() == 0:
+        st.info("Für die ausgewählte(n) Theorie(n) liegen in der aktuellen Filterauswahl keine Daten vor.")
+        return
+
+    if cumulative:
+        trend_df = trend_df.sort_values("Jahr")
+        trend_df["Anzahl"] = trend_df.groupby("Theorie")["Anzahl"].cumsum()
+        y_title = "Kumulierte Anzahl Paper"
+    else:
+        y_title = "Anzahl Paper"
+
+    trend_chart = (
+        alt.Chart(trend_df)
+        .mark_line(point=True, strokeWidth=2.5)
+        .encode(
+            x=alt.X("Jahr:O", title="Erscheinungsjahr"),
+            y=alt.Y("Anzahl:Q", title=y_title),
+            color=alt.Color(
+                "Theorie:N",
+                scale=alt.Scale(scheme="tableau10"),
+                legend=alt.Legend(orient="bottom", title=None),
+            ),
+            tooltip=["Theorie", "Jahr", "Anzahl"],
+        )
+        .properties(height=380)
+        .interactive()
+    )
+    st.altair_chart(trend_chart, use_container_width=True)
+
+    with st.expander("Trend-Daten als Tabelle anzeigen"):
+        pivot = trend_df.pivot(index="Jahr", columns="Theorie", values="Anzahl").reset_index()
+        st.dataframe(pivot, use_container_width=True, hide_index=True)
+
+
 # =======================================================
-# Bildschirm 1: Scraper
+# Bildschirm 1: Journal-Auswahl & Ladevorgang
 # =======================================================
 EMAIL_HINT_SHOWN = [False]
 
@@ -454,10 +560,13 @@ def show_scraper_screen():
     st.markdown('<div class="app-title">📚 Paper-Daten laden</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="app-subtitle">Wähle die Journals aus, für die Paper von OpenAlex '
-        "heruntergeladen werden sollen.</div>",
+        "heruntergeladen werden sollen. Bereits geladene Journals werden dabei aktualisiert, "
+        "alle anderen bleiben unverändert erhalten.</div>",
         unsafe_allow_html=True,
     )
+
     already_loaded = available_journal_codes()
+
     selected = []
     cols = st.columns(2)
     for i, (code, info) in enumerate(JOURNALS.items()):
@@ -475,12 +584,14 @@ def show_scraper_screen():
                 """,
                 unsafe_allow_html=True,
             )
-            checked = st.checkbox("Auswählen", value=(code in already_loaded), key=f"chk_{code}")
+            checked = st.checkbox(
+                "Auswählen", value=(code in already_loaded), key=f"chk_{code}"
+            )
             if checked:
                 selected.append(code)
 
     st.write("")
-    col_a, col_b, _ = st.columns([1, 1, 2])
+    col_a, col_b, col_c = st.columns([1, 1, 2])
     with col_a:
         start = st.button("⬇️ Ausgewählte Journals laden", type="primary", disabled=(len(selected) == 0))
     with col_b:
@@ -490,7 +601,10 @@ def show_scraper_screen():
                 st.rerun()
 
     if not EMAIL_HINT_SHOWN[0]:
-        st.caption("💡 Tipp: Setze `SCRAPER_EMAIL` für OpenAlex' schnellerem 'polite pool'.")
+        st.caption(
+            "💡 Tipp: Setze die Umgebungsvariable `SCRAPER_EMAIL` vor dem Start, "
+            "um von OpenAlex' schnellerem 'polite pool' zu profitieren."
+        )
         EMAIL_HINT_SHOWN[0] = True
 
     if start and selected:
@@ -508,489 +622,30 @@ def show_scraper_screen():
         try:
             scrape_selected(selected, status_callback=status_callback)
             progress_bar.progress(1.0)
-            status_area.update(label="Fertig!", state="complete")
+            status_area.update(label="Fertig! Alle ausgewählten Journals wurden geladen.", state="complete")
         except Exception as e:
-            status_area.update(label="Fehler beim Laden.", state="error")
+            status_area.update(label="Beim Laden ist ein Fehler aufgetreten.", state="error")
             st.error(f"Fehler: {e}")
             return
 
+        # Cache leeren, damit load_papers() / get_enriched_papers() die
+        # frisch gescrapten Daten sofort einlesen, statt alte Cache-Werte
+        # (z.B. ein leeres [] von vor dem ersten Laden) weiterzuverwenden.
         st.cache_data.clear()
         st.session_state.show_scraper = False
-        st.success("Daten erfolgreich aktualisiert.")
+        st.success("Daten erfolgreich aktualisiert. Weiter zum Dashboard...")
         st.rerun()
 
 
 # =======================================================
-# Tab 1: Overview
-# =======================================================
-def render_overview_tab(filtered: pd.DataFrame, theory_counter: Counter, all_theory_names: list, innovative_set: set):
-    total = len(filtered)
-    with_theory = int((filtered["theory_count"] > 0).sum())
-    with_innov = int(filtered["has_innovative_theory"].fillna(False).astype(bool).sum())
-    ce_count = int(filtered["circular_economy"].sum())
-    so_count = int(filtered["sustainability_orientation"].sum())
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        metric_card("Paper gesamt", f"{total:,}".replace(",", "."))
-    with c2:
-        pct = f"{with_theory / total * 100:.0f}% der Paper" if total else ""
-        metric_card("Mit erkannter Theorie", f"{with_theory:,}".replace(",", "."), pct)
-    with c3:
-        pct = f"{with_innov / total * 100:.0f}% der Paper" if total else ""
-        metric_card("Mit innovativer Theorie", f"{with_innov:,}".replace(",", "."), pct, accent=True)
-    with c4:
-        metric_card("Circular Economy", f"{ce_count:,}".replace(",", "."))
-    with c5:
-        metric_card("Sustainability Orientation", f"{so_count:,}".replace(",", "."))
-
-    st.markdown("---")
-
-    st.markdown('<div class="section-header">🏛️ Häufigste Theorien</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-caption">Anzahl der Paper, in denen die Theorie erkannt wurde. '
-        "Goldene Balken = im Text explizit als NEU / innovativ vorgestellt.</div>",
-        unsafe_allow_html=True,
-    )
-
-    if theory_counter:
-        theory_df = (
-            pd.DataFrame(theory_counter.items(), columns=["Theorie", "Anzahl"])
-            .sort_values("Anzahl", ascending=False)
-            .reset_index(drop=True)
-        )
-        theory_df["Typ"] = theory_df["Theorie"].apply(
-            lambda t: "Innovativ" if t in innovative_set
-            else ("Etabliert" if t.lower() in KNOWN_LOWER else "Emerging")
-        )
-
-        top_n = st.slider("Anzahl angezeigter Theorien", 5, min(30, len(theory_df)), min(15, len(theory_df)))
-        top_df = theory_df.head(top_n)
-
-        chart = (
-            alt.Chart(top_df)
-            .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
-            .encode(
-                x=alt.X("Anzahl:Q", title="Anzahl Paper"),
-                y=alt.Y("Theorie:N", sort="-x", title=None),
-                color=alt.Color(
-                    "Typ:N",
-                    scale=alt.Scale(
-                        domain=["Etabliert", "Emerging", "Innovativ"],
-                        range=["#2E6F5E", "#6B3FA0", "#C9A227"],
-                    ),
-                    legend=alt.Legend(orient="bottom", title=None),
-                ),
-                tooltip=["Theorie", "Anzahl", "Typ"],
-            )
-            .properties(height=max(280, top_n * 26))
-        )
-        st.altair_chart(chart, use_container_width=True)
-
-        with st.expander("Alle Theorien als Tabelle"):
-            st.dataframe(theory_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("Für die aktuelle Filterauswahl wurden keine Theorien erkannt.")
-
-    st.markdown("---")
-
-    # Trend
-    st.markdown('<div class="section-header">📈 Theorie-Trend über Zeit</div>', unsafe_allow_html=True)
-    if not all_theory_names:
-        st.info("Keine Theorien für Trend verfügbar.")
-    else:
-        default_theories = [t for t, _ in theory_counter.most_common(3)] if theory_counter else []
-        col1, col2 = st.columns([2.2, 1])
-        with col1:
-            selected_trend_theories = st.multiselect(
-                "Theorie(n) für den Trend",
-                options=all_theory_names,
-                default=default_theories,
-            )
-        with col2:
-            cumulative = st.checkbox("Kumuliert anzeigen", value=False)
-
-        if selected_trend_theories:
-            trend_df = compute_theory_trend(filtered, selected_trend_theories)
-            if not trend_df.empty and trend_df["Anzahl"].sum() > 0:
-                if cumulative:
-                    trend_df = trend_df.sort_values("Jahr")
-                    trend_df["Anzahl"] = trend_df.groupby("Theorie")["Anzahl"].cumsum()
-                    y_title = "Kumulierte Anzahl Paper"
-                else:
-                    y_title = "Anzahl Paper"
-
-                trend_chart = (
-                    alt.Chart(trend_df)
-                    .mark_line(point=True, strokeWidth=2.5)
-                    .encode(
-                        x=alt.X("Jahr:O", title="Erscheinungsjahr"),
-                        y=alt.Y("Anzahl:Q", title=y_title),
-                        color=alt.Color("Theorie:N", scale=alt.Scale(scheme="tableau10"),
-                                        legend=alt.Legend(orient="bottom", title=None)),
-                        tooltip=["Theorie", "Jahr", "Anzahl"],
-                    )
-                    .properties(height=380)
-                    .interactive()
-                )
-                st.altair_chart(trend_chart, use_container_width=True)
-
-    st.markdown("---")
-
-    # Journal + Jahr
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.markdown('<div class="section-header">📰 Paper pro Journal</div>', unsafe_allow_html=True)
-        journal_counts = filtered["journal_name"].value_counts().reset_index()
-        journal_counts.columns = ["Journal", "Anzahl"]
-        donut = (
-            alt.Chart(journal_counts)
-            .mark_arc(innerRadius=60)
-            .encode(theta="Anzahl:Q",
-                    color=alt.Color("Journal:N", scale=alt.Scale(scheme="tealblues"),
-                                    legend=alt.Legend(orient="bottom", title=None)),
-                    tooltip=["Journal", "Anzahl"])
-            .properties(height=340)
-        )
-        st.altair_chart(donut, use_container_width=True)
-
-    with col_right:
-        st.markdown('<div class="section-header">📈 Paper pro Jahr</div>', unsafe_allow_html=True)
-        year_counts = (
-            filtered.dropna(subset=["year"])
-            .assign(year=lambda d: d["year"].astype(int))
-            .groupby("year").size().reset_index(name="Anzahl")
-        )
-        area = (
-            alt.Chart(year_counts)
-            .mark_area(line={"color": "#2E6F5E"}, color="#E7F2EE", opacity=0.7)
-            .encode(x=alt.X("year:O", title="Jahr"),
-                    y=alt.Y("Anzahl:Q"),
-                    tooltip=["year", "Anzahl"])
-            .properties(height=340)
-        )
-        st.altair_chart(area, use_container_width=True)
-
-
-# =======================================================
-# Tab 2: Innovative Theorien
-# =======================================================
-def render_innovative_tab(filtered: pd.DataFrame):
-    st.markdown('<div class="section-header">🆕 Innovative / neu vorgestellte Theorien</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-caption">Nur Theorien, die im Abstract explizit als NEU, NOVEL, '
-        "SELBST ENTWICKELT oder VORGESCHLAGEN gekennzeichnet sind. Sortiert nach Innovations-"
-        "Konfidenz (0–1), die auf Häufigkeit, Klarheit und expliziter Neuheitssprache basiert.</div>",
-        unsafe_allow_html=True,
-    )
-
-    innovative_df = filtered[filtered["has_innovative_theory"].fillna(False).astype(bool)].copy()
-
-    if innovative_df.empty:
-        st.info(
-            "In der aktuellen Auswahl wurden keine Paper mit explizit als neu/innovativ "
-            "gekennzeichneten Theorien gefunden. Erweitere die Filter oder deaktiviere den "
-            "Themenfilter."
-        )
-        return
-
-    innov_counter = count_innovative_theories(innovative_df.to_dict("records"))
-    top_innov = innov_counter.most_common(20)
-
-    if top_innov:
-        st.markdown("#### Ranking der als neu markierten Theorien")
-        innov_theory_df = pd.DataFrame(top_innov, columns=["Theorie", "Anzahl Paper"])
-        chart = (
-            alt.Chart(innov_theory_df)
-            .mark_bar(color="#C9A227", cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
-            .encode(
-                x=alt.X("Anzahl Paper:Q"),
-                y=alt.Y("Theorie:N", sort="-x", title=None),
-                tooltip=["Theorie", "Anzahl Paper"],
-            )
-            .properties(height=max(280, len(innov_theory_df) * 26))
-        )
-        st.altair_chart(chart, use_container_width=True)
-    else:
-        st.caption(
-            "Innovations-Signale erkannt, aber ohne rekonstruierbaren Theorienamen "
-            "(z.B. 'we propose a novel theory'). Die betroffenen Paper stehen unten."
-        )
-
-    st.markdown("---")
-    st.markdown("#### Top-Paper nach Innovations-Konfidenz")
-
-    innov_sorted = innovative_df.sort_values("innovation_confidence", ascending=False).head(20)
-
-    for _, row in innov_sorted.iterrows():
-        conf = row.get("innovation_confidence", 0)
-        title = row.get("title", "")
-        with st.expander(f"🆕 {title}  —  Konfidenz {conf:.2f}"):
-            authors = get_authors_list(row)
-            st.markdown(
-                f'<div style="color:#6B7A72;margin-bottom:0.4rem;">'
-                f'👤 {format_authors(authors)}</div>', unsafe_allow_html=True,
-            )
-            m1, m2, m3 = st.columns(3)
-            m1.write(f"**Journal:** {row.get('journal_name', '')} ({row.get('year', '')})")
-            m2.write(f"**DOI:** {row.get('doi', '') or '–'}")
-            m3.write(f"**Zitationen:** {row.get('citations', 0)}")
-
-            innov = row.get("innovative_theories") or []
-            if innov:
-                st.write("**Als neu vorgestellte Theorien:** " +
-                         ", ".join(f"🆕 {t}" for t in innov))
-            unnamed = row.get("unnamed_innovative_count", 0) or 0
-            if unnamed:
-                st.write(f"**Unbenannte Innovations-Signale:** {unnamed}")
-
-            snippets = row.get("novelty_snippets") or []
-            if snippets:
-                st.write("**Fundstellen im Abstract:**")
-                for s in snippets[:5]:
-                    st.markdown(
-                        f'<div class="snippet-box">…{s["snippet"]}…</div>',
-                        unsafe_allow_html=True,
-                    )
-
-            st.write("**Abstract (mit Highlights):**")
-            st.markdown(
-                highlight_novelty(row.get("abstract") or "_Kein Abstract verfügbar._"),
-                unsafe_allow_html=True,
-            )
-
-
-# =======================================================
-# Tab 3: Emerging Candidates
-# =======================================================
-def render_emerging_tab(filtered: pd.DataFrame):
-    st.markdown('<div class="section-header">🔬 Emerging Candidates (unbekannte Theorien)</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-caption">Theorien, die weder auf der bekannten Liste stehen '
-        "noch als generisch aussortiert wurden – potentielle Neuentdeckungen ohne explizite "
-        "'novel'-Sprache. Häufigkeit = Anzahl der Paper.</div>",
-        unsafe_allow_html=True,
-    )
-    emerging_counter = count_emerging_candidates(filtered.to_dict("records"))
-
-    if not emerging_counter:
-        st.info("Für die aktuelle Auswahl wurden keine Emerging Candidates gefunden.")
-        return
-
-    emerging_df = pd.DataFrame(emerging_counter.most_common(), columns=["Theorie", "Anzahl"])
-    min_count = st.slider(
-        "Mindesthäufigkeit für Anzeige", 1, max(1, int(emerging_df["Anzahl"].max())), 1
-    )
-    emerging_df = emerging_df[emerging_df["Anzahl"] >= min_count]
-
-    chart = (
-        alt.Chart(emerging_df.head(30))
-        .mark_bar(color="#6B3FA0", cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
-        .encode(
-            x=alt.X("Anzahl:Q"),
-            y=alt.Y("Theorie:N", sort="-x", title=None),
-            tooltip=["Theorie", "Anzahl"],
-        )
-        .properties(height=max(280, min(30, len(emerging_df)) * 24))
-    )
-    st.altair_chart(chart, use_container_width=True)
-
-    with st.expander("Alle Emerging Candidates als Tabelle"):
-        st.dataframe(emerging_df, use_container_width=True, hide_index=True)
-
-
-# =======================================================
-# Tab 4: Netzwerk
-# =======================================================
-def render_network_tab(filtered: pd.DataFrame, innovative_set: set):
-    st.markdown('<div class="section-header">🕸️ Theorie-Netzwerk</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-caption">Gemeinsames Auftreten von Theorien in einem Abstract. '
-        "Goldene Knoten = im Text als neu markiert.</div>",
-        unsafe_allow_html=True,
-    )
-
-    records_for_network = filtered.to_dict("records")
-    pair_counter, freq_counter = compute_theory_cooccurrence(records_for_network)
-
-    if not pair_counter:
-        st.info("Keine gemeinsam auftretenden Theoriepaare in der aktuellen Auswahl.")
-        return
-
-    c1, c2, c3 = st.columns([1.4, 1.4, 1.4])
-    with c1:
-        max_possible = max(pair_counter.values())
-        min_co = st.slider("Mind. gemeinsame Nennungen", 1, max(1, max_possible), 1)
-    with c2:
-        max_nodes_option = st.slider("Max. Theorien im Netzwerk", 5,
-                                     max(5, len(freq_counter)), min(25, len(freq_counter)))
-    with c3:
-        theory_options = ["– keine –"] + sorted(freq_counter.keys())
-        highlight_choice = st.selectbox("Theorie hervorheben", theory_options)
-        highlight_theory = None if highlight_choice == "– keine –" else highlight_choice
-
-    show_all_labels = st.checkbox("Alle Beschriftungen anzeigen", value=True)
-
-    fig = build_theory_network_figure(
-        pair_counter, freq_counter,
-        min_cooccurrence=min_co, max_nodes=max_nodes_option,
-        highlight_theory=highlight_theory, show_all_labels=show_all_labels,
-        innovative_set=innovative_set,
-    )
-    if fig is None:
-        st.info("Bei dieser Schwelle bleiben keine Verbindungen übrig.")
-        return
-
-    st.plotly_chart(
-        fig, use_container_width=True,
-        config={"scrollZoom": True, "displaylogo": False,
-                "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
-    )
-
-    pair_list = pair_counter.most_common()
-    pair_df = pd.DataFrame(
-        [{"Theorie A": a, "Theorie B": b, "Gemeinsame Paper": c} for (a, b), c in pair_list]
-    )
-    with st.expander("Häufigste Theorie-Paare"):
-        st.dataframe(pair_df, use_container_width=True, hide_index=True)
-
-
-# =======================================================
-# Tab 5: Paper
-# =======================================================
-def render_papers_tab(filtered: pd.DataFrame, theory_filter: list):
-    st.markdown('<div class="section-header">📄 Paper im Detail</div>', unsafe_allow_html=True)
-
-    display_df = filtered.copy()
-    display_df["Autoren"] = display_df.apply(
-        lambda r: format_authors(get_authors_list(r), max_shown=2), axis=1
-    )
-    display_df["Innov."] = display_df["innovation_confidence"].fillna(0).round(2)
-    display_df = display_df[[
-        "title", "Autoren", "journal_code", "year", "citations",
-        "theory_count", "Innov.", "circular_economy", "sustainability_orientation",
-    ]].sort_values(
-        ["Innov.", "theory_count"], ascending=[False, False]
-    ).rename(columns={
-        "title": "Titel", "journal_code": "Journal", "year": "Jahr",
-        "citations": "Zit.", "theory_count": "Theorien",
-        "circular_economy": "CE", "sustainability_orientation": "SO",
-    })
-
-    st.dataframe(display_df, use_container_width=True, height=420, hide_index=True)
-
-    csv = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Gefilterte Ergebnisse als CSV",
-        data=csv, file_name="theorie_landscape_export.csv", mime="text/csv",
-    )
-
-    st.markdown("---")
-
-    st.markdown('<div class="section-header">🔍 Paper durchsuchen</div>', unsafe_allow_html=True)
-    search_query = st.text_input(
-        "🔎 Suchbegriff",
-        placeholder="Titel, Autor:in oder Stichwort im Abstract...",
-        label_visibility="collapsed",
-    )
-
-    search_results = filtered.copy()
-    if search_query:
-        q = search_query.lower().strip()
-
-        def matches(row):
-            return (
-                q in str(row.get("title", "")).lower()
-                or q in str(row.get("abstract", "")).lower()
-                or any(q in a.lower() for a in get_authors_list(row))
-            )
-
-        search_results = search_results[search_results.apply(matches, axis=1)]
-
-    search_results = search_results.sort_values(
-        ["innovation_confidence", "theory_count"], ascending=[False, False]
-    )
-    total_hits = len(search_results)
-    max_display = 30
-
-    if theory_filter:
-        st.caption(f"{total_hits} Treffer · gefiltert nach: {', '.join(theory_filter)}")
-    else:
-        st.caption(f"{total_hits} Treffer")
-
-    if total_hits == 0:
-        st.info("Keine Paper gefunden.")
-        return
-
-    if total_hits > max_display:
-        st.caption(f"Zeige die {max_display} relevantesten Treffer.")
-
-    for _, row in search_results.head(max_display).iterrows():
-        authors = get_authors_list(row)
-        badges = ""
-        if row.get("has_innovative_theory"):
-            badges += '<span class="badge-innov">🆕 Innovative Theorie</span>'
-        if row.get("circular_economy"):
-            badges += '<span class="badge-ce">Circular Economy</span>'
-        if row.get("sustainability_orientation"):
-            badges += '<span class="badge-so">Sustainability Orientation</span>'
-
-        title = row.get('title', '')
-        conf = row.get("innovation_confidence", 0)
-        suffix = f" · 🆕 {conf:.2f}" if conf and conf > 0 else ""
-
-        with st.expander(f"{title}  —  {row.get('journal_code', '')} · {row.get('year', '')}{suffix}"):
-            if badges:
-                st.markdown(badges, unsafe_allow_html=True)
-            st.markdown(
-                f'<div style="color:#6B7A72;font-size:0.85rem;margin-bottom:0.4rem;">'
-                f'👤 {format_authors(authors)}</div>', unsafe_allow_html=True,
-            )
-            m1, m2, m3 = st.columns(3)
-            m1.write(f"**Journal:** {row.get('journal_name', '')} ({row.get('year', '')})")
-            m2.write(f"**DOI:** {row.get('doi', '') or '–'}")
-            m3.write(f"**Zitationen:** {row.get('citations', 0)}")
-
-            known = row.get("known_theories") or []
-            emerging = row.get("emerging_candidates") or []
-            innov = row.get("innovative_theories") or []
-
-            if known:
-                st.markdown("**Etablierte Theorien:** " +
-                            ", ".join(f'<span class="badge-known">{t}</span>' for t in known),
-                            unsafe_allow_html=True)
-            if emerging:
-                st.markdown("**Emerging Candidates:** " +
-                            ", ".join(f'<span class="badge-emerging">{t}</span>' for t in emerging),
-                            unsafe_allow_html=True)
-            if innov:
-                st.markdown("**Als neu markierte Theorien:** " +
-                            ", ".join(f'<span class="badge-innov">🆕 {t}</span>' for t in innov),
-                            unsafe_allow_html=True)
-            if not (known or emerging or innov):
-                st.write("**Erkannte Theorien:** keine")
-
-            st.write("**Abstract:**")
-            st.markdown(
-                highlight_novelty(row.get("abstract") or "_Kein Abstract verfügbar._"),
-                unsafe_allow_html=True,
-            )
-
-            # Debug: verworfene Generics
-            generic = row.get("generic_theories") or []
-            if generic:
-                with st.popover("🔧 Debug: als generisch verworfene Kandidaten"):
-                    st.write(", ".join(generic))
-
-
-# =======================================================
-# Dashboard
+# Bildschirm 2: Dashboard
 # =======================================================
 def show_dashboard():
     papers = load_papers()
     enriched = get_enriched_papers(papers)
     df = pd.DataFrame(enriched)
 
+    # ---- Absturzsicher: keine/leere Daten ----
     if df.empty:
         st.markdown('<div class="app-title">Theorie-Landscape</div>', unsafe_allow_html=True)
         st.markdown(
@@ -1001,7 +656,7 @@ def show_dashboard():
             """
             <div class="empty-state">
                 <h4>📭 Es sind noch keine Paper geladen</h4>
-                <p>Wähle in der Seitenleiste Journals aus und lade die Daten.</p>
+                <p>Wähle in der Seitenleiste Journals aus und lade die Daten, um das Dashboard zu befüllen.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1012,14 +667,9 @@ def show_dashboard():
         return
 
     df = ensure_required_columns(df)
+    all_theory_names = sorted(count_all_theories(df.to_dict("records")).keys())
 
-    # Basis-Zähler
-    all_theory_counter = count_all_theories(df.to_dict("records"))
-    all_theory_names = sorted(all_theory_counter.keys())
-    all_innovative_counter = count_innovative_theories(df.to_dict("records"))
-    innovative_set_global = set(all_innovative_counter.keys())
-
-    # ---- Sidebar ----
+    # ---------------- Sidebar ----------------
     st.sidebar.markdown("### 📂 Daten")
     if st.sidebar.button("🔄 Journals laden / aktualisieren"):
         st.session_state.show_scraper = True
@@ -1027,6 +677,7 @@ def show_dashboard():
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔎 Filter")
+
     journals = sorted(df["journal_code"].dropna().unique())
     selected_journals = st.sidebar.multiselect("Journal", journals, default=journals)
 
@@ -1035,7 +686,7 @@ def show_dashboard():
         year_min, year_max = int(years.min()), int(years.max())
         if year_min == year_max:
             selected_years = (year_min, year_max)
-            st.sidebar.caption(f"Alle Paper aus {year_min}.")
+            st.sidebar.caption(f"Alle Paper stammen aus {year_min}.")
         else:
             selected_years = st.sidebar.slider(
                 "Erscheinungsjahr", year_min, year_max, (year_min, year_max)
@@ -1043,23 +694,16 @@ def show_dashboard():
     else:
         selected_years = (0, 9999)
 
-    only_circular = st.sidebar.checkbox("Nur Circular Economy", value=False)
-    only_sustainability = st.sidebar.checkbox("Nur Sustainability Orientation", value=False)
+    only_circular = st.sidebar.checkbox("Nur Circular Economy Paper", value=False)
+    only_sustainability = st.sidebar.checkbox("Nur Sustainability Orientation Paper", value=False)
     only_with_theory = st.sidebar.checkbox("Nur Paper mit erkannter Theorie", value=False)
-    only_innovative = st.sidebar.checkbox("🆕 Nur Paper mit innovativer Theorie", value=False)
-
-    min_confidence = st.sidebar.slider(
-        "Min. Innovations-Konfidenz",
-        0.0, 1.0, 0.0, 0.05,
-        help="Filtert Paper nach der Konfidenz, mit der eine neue Theorie erkannt wurde.",
-    )
 
     theory_filter = st.sidebar.multiselect(
-        "Nach Theorie filtern", options=all_theory_names,
-        help="Zeigt nur Paper, in denen mindestens eine der Theorien vorkommt.",
+        "Nach Theorie filtern",
+        options=all_theory_names,
+        help="Zeigt nur Paper, in denen mindestens eine der ausgewählten Theorien erkannt wurde.",
     )
 
-    # Filter anwenden
     filtered = df[
         df["journal_code"].isin(selected_journals)
         & df["year"].fillna(0).astype(int).between(selected_years[0], selected_years[1])
@@ -1070,20 +714,18 @@ def show_dashboard():
         filtered = filtered[filtered["sustainability_orientation"] == True]
     if only_with_theory:
         filtered = filtered[filtered["theory_count"] > 0]
-    if only_innovative:
-        filtered = filtered[filtered["has_innovative_theory"].fillna(False).astype(bool)]
-    if min_confidence > 0:
-        filtered = filtered[filtered["innovation_confidence"].fillna(0) >= min_confidence]
     if theory_filter:
         filtered = filtered[
-            filtered["all_theories"].apply(lambda ts: any(t in (ts or []) for t in theory_filter))
+            filtered["all_theories"].apply(
+                lambda ts: any(t in (ts or []) for t in theory_filter)
+            )
         ]
 
-    # Header
+    # ---------------- Header ----------------
     st.markdown('<div class="app-title">Theorie-Landscape</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="app-subtitle">Circular Economy & Sustainability Orientation – '
-        "regelbasierte Erkennung etablierter und neuer Theorien</div>",
+        "automatisch aus Abstracts extrahierte Theorien mittels regelbasierter Erkennung</div>",
         unsafe_allow_html=True,
     )
 
@@ -1091,36 +733,360 @@ def show_dashboard():
         st.warning("Für die aktuelle Filterauswahl wurden keine Paper gefunden.")
         return
 
+    # ---------------- Kennzahlen ----------------
+    c1, c2, c3, c4 = st.columns(4)
+    total = len(filtered)
+    with_theory = int((filtered["theory_count"] > 0).sum())
+    ce_count = int(filtered["circular_economy"].sum())
+    so_count = int(filtered["sustainability_orientation"].sum())
+
+    with c1:
+        metric_card("Paper gesamt", f"{total:,}".replace(",", "."))
+    with c2:
+        pct = f"{with_theory / total * 100:.0f}% der Paper" if total else ""
+        metric_card("Mit erkannter Theorie", f"{with_theory:,}".replace(",", "."), pct)
+    with c3:
+        metric_card("Circular Economy", f"{ce_count:,}".replace(",", "."))
+    with c4:
+        metric_card("Sustainability Orientation", f"{so_count:,}".replace(",", "."))
+
+    st.write("")
+    st.markdown("---")
+
+    # ---------------- Häufigste Theorien ----------------
+    st.markdown('<div class="section-header">🏛️ Häufigste Theorien</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Anzahl der Paper, in denen die jeweilige Theorie erkannt wurde</div>',
+        unsafe_allow_html=True,
+    )
+
     theory_counter = count_all_theories(filtered.to_dict("records"))
 
-    # Tabs
-    tab_overview, tab_innov, tab_emerging, tab_network, tab_papers = st.tabs([
-        "📊 Übersicht",
-        "🆕 Innovative Theorien",
-        "🔬 Emerging Candidates",
-        "🕸️ Netzwerk",
-        "📄 Paper",
-    ])
+    if theory_counter:
+        theory_df = (
+            pd.DataFrame(theory_counter.items(), columns=["Theorie", "Anzahl"])
+            .sort_values("Anzahl", ascending=False)
+            .reset_index(drop=True)
+        )
 
-    with tab_overview:
-        render_overview_tab(filtered, theory_counter, all_theory_names, innovative_set_global)
-    with tab_innov:
-        render_innovative_tab(filtered)
-    with tab_emerging:
-        render_emerging_tab(filtered)
-    with tab_network:
-        render_network_tab(filtered, innovative_set_global)
-    with tab_papers:
-        render_papers_tab(filtered, theory_filter)
+        top_n = st.slider(
+            "Anzahl angezeigter Theorien", 5, min(30, len(theory_df)), min(15, len(theory_df))
+        )
+        top_df = theory_df.head(top_n)
+
+        chart = (
+            alt.Chart(top_df)
+            .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4, color="#2E6F5E")
+            .encode(
+                x=alt.X("Anzahl:Q", title="Anzahl Paper"),
+                y=alt.Y("Theorie:N", sort="-x", title=None),
+                tooltip=["Theorie", "Anzahl"],
+            )
+            .properties(height=max(280, top_n * 26))
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+        with st.expander("Alle Theorien als Tabelle anzeigen"):
+            st.dataframe(theory_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Für die aktuelle Filterauswahl wurden keine Theorien erkannt.")
+
+    st.markdown("---")
+
+    # ---------------- Theorie-Trend über Zeit ----------------
+    show_theory_trend_section(filtered, all_theory_names, theory_counter)
+
+    st.markdown("---")
+
+    # ---------------- Journal & Jahr nebeneinander ----------------
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.markdown('<div class="section-header">📰 Paper pro Journal</div>', unsafe_allow_html=True)
+        journal_counts = filtered["journal_name"].value_counts().reset_index()
+        journal_counts.columns = ["Journal", "Anzahl"]
+        donut = (
+            alt.Chart(journal_counts)
+            .mark_arc(innerRadius=60)
+            .encode(
+                theta="Anzahl:Q",
+                color=alt.Color(
+                    "Journal:N",
+                    scale=alt.Scale(scheme="tealblues"),
+                    legend=alt.Legend(orient="bottom", title=None),
+                ),
+                tooltip=["Journal", "Anzahl"],
+            )
+            .properties(height=340)
+        )
+        st.altair_chart(donut, use_container_width=True)
+
+    with col_right:
+        st.markdown('<div class="section-header">📈 Paper pro Jahr</div>', unsafe_allow_html=True)
+        year_counts = (
+            filtered.dropna(subset=["year"])
+            .assign(year=lambda d: d["year"].astype(int))
+            .groupby("year")
+            .size()
+            .reset_index(name="Anzahl")
+        )
+        area = (
+            alt.Chart(year_counts)
+            .mark_area(line={"color": "#2E6F5E"}, color="#E7F2EE", opacity=0.7)
+            .encode(
+                x=alt.X("year:O", title="Jahr"),
+                y=alt.Y("Anzahl:Q"),
+                tooltip=["year", "Anzahl"],
+            )
+            .properties(height=340)
+        )
+        st.altair_chart(area, use_container_width=True)
+
+    st.markdown("---")
+
+    # ---------------- CE vs. SO nach Journal ----------------
+    st.markdown(
+        '<div class="section-header">🌱 Circular Economy vs. Sustainability Orientation nach Journal</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="section-caption">Vergleich, wie viele Paper je Journal jeweils dem Thema '
+        "zugeordnet wurden</div>",
+        unsafe_allow_html=True,
+    )
+
+    topic_df = (
+        filtered.groupby("journal_name")[["circular_economy", "sustainability_orientation"]]
+        .sum()
+        .reset_index()
+        .melt(id_vars="journal_name", var_name="Thema", value_name="Anzahl")
+    )
+    topic_df["Thema"] = topic_df["Thema"].map(
+        {"circular_economy": "Circular Economy", "sustainability_orientation": "Sustainability Orientation"}
+    )
+    grouped_bar = (
+        alt.Chart(topic_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("journal_name:N", title=None, axis=alt.Axis(labelAngle=-20)),
+            y=alt.Y("Anzahl:Q"),
+            color=alt.Color(
+                "Thema:N",
+                scale=alt.Scale(range=["#2E6F5E", "#C9A227"]),
+                legend=alt.Legend(orient="bottom", title=None),
+            ),
+            xOffset="Thema:N",
+            tooltip=["journal_name", "Thema", "Anzahl"],
+        )
+        .properties(height=320)
+    )
+    st.altair_chart(grouped_bar, use_container_width=True)
+
+    st.markdown("---")
+
+    # ---------------- Netzwerk-Analyse ----------------
+    st.markdown('<div class="section-header">🕸️ Theorie-Netzwerk</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Zeigt, welche Theorien häufig gemeinsam in einem Abstract '
+        "untersucht werden. Linienstärke = Anzahl gemeinsamer Paper, Knotengröße = Gesamthäufigkeit. "
+        "Zoome, verschiebe und hovere über Knoten/Kanten für Details – oder hebe gezielt eine "
+        "Theorie samt ihrer Verbindungen hervor.</div>",
+        unsafe_allow_html=True,
+    )
+
+    records_for_network = filtered.to_dict("records")
+    pair_counter, freq_counter = compute_theory_cooccurrence(records_for_network)
+
+    if not pair_counter:
+        st.info(
+            "Für die aktuelle Filterauswahl gibt es keine Paper, in denen mindestens zwei "
+            "Theorien gemeinsam erkannt wurden."
+        )
+    else:
+        net_col1, net_col2, net_col3 = st.columns([1.4, 1.4, 1.4])
+        with net_col1:
+            max_possible = max(pair_counter.values())
+            min_co = st.slider(
+                "Mind. gemeinsame Nennungen je Verbindung",
+                1, max(1, max_possible), 1,
+            )
+        with net_col2:
+            max_nodes_option = st.slider(
+                "Max. Anzahl Theorien im Netzwerk", 5, max(5, len(freq_counter)), min(25, len(freq_counter))
+            )
+        with net_col3:
+            theory_options = ["– keine –"] + sorted(freq_counter.keys())
+            highlight_choice = st.selectbox(
+                "Theorie hervorheben", theory_options,
+                help="Hebt eine Theorie und alle direkt verbundenen Theorien farblich hervor.",
+            )
+            highlight_theory = None if highlight_choice == "– keine –" else highlight_choice
+
+        show_all_labels = st.checkbox(
+            "Alle Beschriftungen anzeigen (statt nur der häufigsten Theorien)", value=True
+        )
+
+        fig = build_theory_network_figure(
+            pair_counter,
+            freq_counter,
+            min_cooccurrence=min_co,
+            max_nodes=max_nodes_option,
+            highlight_theory=highlight_theory,
+            show_all_labels=show_all_labels,
+        )
+
+        if fig is None:
+            st.info("Bei dieser Mindestanzahl bleiben keine Verbindungen übrig. Schwelle reduzieren.")
+        else:
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                config={
+                    "scrollZoom": True,
+                    "displaylogo": False,
+                    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                },
+            )
+
+        pair_list = pair_counter.most_common()
+        pair_df = pd.DataFrame(
+            [{"Theorie A": a, "Theorie B": b, "Gemeinsame Paper": c} for (a, b), c in pair_list]
+        )
+
+        table_col, chart_col = st.columns([1.3, 1])
+        with table_col:
+            with st.expander("Häufigste Theorie-Paare als Tabelle anzeigen", expanded=False):
+                st.dataframe(pair_df, use_container_width=True, hide_index=True)
+        with chart_col:
+            with st.expander("Top 10 Theorie-Paare als Chart anzeigen", expanded=False):
+                top_pairs = pair_df.head(10).copy()
+                top_pairs["Paar"] = top_pairs["Theorie A"] + " ↔ " + top_pairs["Theorie B"]
+                pair_chart = (
+                    alt.Chart(top_pairs)
+                    .mark_bar(color="#C9A227", cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+                    .encode(
+                        x=alt.X("Gemeinsame Paper:Q"),
+                        y=alt.Y("Paar:N", sort="-x", title=None),
+                        tooltip=["Theorie A", "Theorie B", "Gemeinsame Paper"],
+                    )
+                    .properties(height=320)
+                )
+                st.altair_chart(pair_chart, use_container_width=True)
+
+    st.markdown("---")
+
+    # ---------------- Paper-Tabelle ----------------
+    st.markdown('<div class="section-header">📄 Paper im Detail</div>', unsafe_allow_html=True)
+
+    display_df = filtered.copy()
+    display_df["Autoren"] = display_df.apply(
+        lambda r: format_authors(get_authors_list(r), max_shown=2), axis=1
+    )
+    display_df = display_df[[
+        "title", "Autoren", "journal_code", "year", "citations",
+        "theory_count", "circular_economy", "sustainability_orientation"
+    ]].sort_values("theory_count", ascending=False).rename(columns={
+        "title": "Titel", "journal_code": "Journal", "year": "Jahr",
+        "citations": "Zitationen", "theory_count": "Theorien",
+        "circular_economy": "CE", "sustainability_orientation": "SO",
+    })
+
+    st.dataframe(display_df, use_container_width=True, height=380, hide_index=True)
+
+    csv = filtered.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Gefilterte Ergebnisse als CSV herunterladen",
+        data=csv,
+        file_name="theorie_landscape_export.csv",
+        mime="text/csv",
+    )
+
+    st.markdown("---")
+
+    # ---------------- Suchleiste + Ergebnisliste ----------------
+    st.markdown('<div class="section-header">🔍 Paper durchsuchen</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">Suche nach Titel, Autor:in oder Stichwort im Abstract. '
+        "Nutze zusätzlich den Theorie-Filter in der Seitenleiste, um z.B. alle Abstracts zu "
+        "sehen, in denen eine bestimmte Theorie vorkommt.</div>",
+        unsafe_allow_html=True,
+    )
+
+    search_query = st.text_input(
+        "🔎 Suchbegriff",
+        placeholder="z.B. 'stakeholder theory', ein Autorenname oder ein Stichwort...",
+        label_visibility="collapsed",
+    )
+
+    search_results = filtered.copy()
+    if search_query:
+        q = search_query.lower().strip()
+
+        def matches(row):
+            title_match = q in str(row.get("title", "")).lower()
+            abstract_match = q in str(row.get("abstract", "")).lower()
+            author_match = any(q in a.lower() for a in get_authors_list(row))
+            return title_match or abstract_match or author_match
+
+        search_results = search_results[search_results.apply(matches, axis=1)]
+
+    search_results = search_results.sort_values("theory_count", ascending=False)
+    total_hits = len(search_results)
+    max_display = 30
+
+    if theory_filter:
+        st.caption(
+            f"{total_hits} Treffer · gefiltert nach Theorie(n): {', '.join(theory_filter)}"
+        )
+    else:
+        st.caption(f"{total_hits} Treffer")
+
+    if total_hits == 0:
+        st.info("Keine Paper gefunden, die zu Suchbegriff und Filtern passen.")
+    else:
+        if total_hits > max_display:
+            st.caption(f"Zeige die {max_display} relevantesten Treffer (nach Anzahl erkannter Theorien sortiert).")
+
+        for _, row in search_results.head(max_display).iterrows():
+            authors = get_authors_list(row)
+            badges = ""
+            if row.get("circular_economy"):
+                badges += '<span class="badge-ce">Circular Economy</span>'
+            if row.get("sustainability_orientation"):
+                badges += '<span class="badge-so">Sustainability Orientation</span>'
+
+            with st.expander(f"{row['title']}  —  {row.get('journal_code', '')} · {row.get('year', '')}"):
+                if badges:
+                    st.markdown(badges, unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="authors-line">👤 {format_authors(authors)}</div>',
+                    unsafe_allow_html=True,
+                )
+
+                meta_col1, meta_col2, meta_col3 = st.columns(3)
+                meta_col1.write(f"**Journal:** {row.get('journal_name', '')} ({row.get('year', '')})")
+                meta_col2.write(f"**DOI:** {row.get('doi', '') or '–'}")
+                meta_col3.write(f"**Zitationen:** {row.get('citations', 0)}")
+
+                theories = row.get("all_theories") or []
+                if theories:
+                    st.write("**Erkannte Theorien:** " + ", ".join(theories))
+                else:
+                    st.write("**Erkannte Theorien:** keine")
+
+                st.write("**Abstract:**")
+                st.write(row.get("abstract") or "_Kein Abstract verfügbar._")
 
 
 # =======================================================
-# main
+# Hauptprogramm
 # =======================================================
 def main():
     inject_css()
+
     if "show_scraper" not in st.session_state:
         st.session_state.show_scraper = len(load_papers()) == 0
+
     if st.session_state.show_scraper:
         show_scraper_screen()
     else:
